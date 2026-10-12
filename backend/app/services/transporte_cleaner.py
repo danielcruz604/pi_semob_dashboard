@@ -2,197 +2,127 @@ import re
 from typing import Any, Dict
 import pandas as pd
 from app.services.transporte_columns import (
+    COLUNAS_DECIMAIS,
+    COLUNAS_INTEIRAS,
     desduplicar_colunas,
     nome_coluna_base,
     normalizar_nome_coluna,
     normalizar_texto,
-    coluna_eh_inteira,
-    coluna_eh_numerica,
-    coluna_eh_texto_estrito,
 )
-from app.services.transporte_numbers import (
-    tentar_converter_coluna_numerica,
+from app.services.transporte_numbers import tentar_converter_coluna_numerica
+
+COLUNAS_DATA_HORA = {
+    "inicio_programado", "inicio_realizado", "fim_programado", "fim_realizado",
+}
+
+MARCADORES_AGREGADOS = re.compile(
+    r"^(?:total(?:\s|_|$)|subtotal(?:\s|_|$)|resumo(?:\s|_|$)|fonte:|emissao:|pagina:)"
 )
 
-def _obter_indices_colunas_artificiais(
-    df: pd.DataFrame,
-) -> list[str]:
-    colunas_remover = []
+def _adicionar_metadados(df: pd.DataFrame, metadados: Dict[str, Any]) -> pd.DataFrame:
+    df["meta_tipo_relatorio"] = metadados.get("tipo_relatorio")
+    df["meta_periodicidade"] = metadados.get("periodicidade")
+    for campo in ("ano", "mes", "semana", "data"):
+        valor = metadados.get(campo)
+        if valor is not None:
+            df[f"meta_{campo}"] = valor
+    return df
 
+def _normalizar_valores_vazios(df: pd.DataFrame) -> pd.DataFrame:
     for coluna in df.columns:
-        base = nome_coluna_base(coluna)
+        serie = df[coluna].astype("string").str.strip()
+        vazios = serie.str.lower().isin({"", "nan", "none", "null", "<na>", "n/a"})
+        df[coluna] = serie.mask(vazios, pd.NA)
+    return df
 
-        if re.fullmatch(
-            r"unnamed(?:_\d+)?",
-            base,
-            flags=re.IGNORECASE,
-        ):
-            colunas_remover.append(coluna)
+def _remover_colunas_artificiais(df: pd.DataFrame) -> pd.DataFrame:
+    remover = []
+    for coluna in df.columns:
+        base = nome_coluna_base(str(coluna))
+        if re.fullmatch(r"unnamed(?:_\d+)?", base, re.IGNORECASE):
+            remover.append(coluna)
+    if remover:
+        df = df.drop(columns=remover)
+    return df
 
-    return colunas_remover
-
-def higienizar_dataframe(
-    df: pd.DataFrame,
-    metadados: Dict[str, Any],
-) -> pd.DataFrame:
-    df = df.copy()
-
-    colunas_processadas = [
-        normalizar_nome_coluna(coluna)
-        for coluna in df.columns
-    ]
-
-    df.columns = desduplicar_colunas(
-        colunas_processadas
-    )
-
-    colunas_artificiais = (
-        _obter_indices_colunas_artificiais(
-            df
-        )
-    )
-
-    if colunas_artificiais:
-        df = df.drop(
-            columns=colunas_artificiais
-        )
-
-    df = (
-        df
-        .dropna(how="all")
-        .dropna(
-            axis=1,
-            how="all",
-        )
-        .copy()
-    )
-
+def _remover_totais(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
+    mascara = pd.Series(False, index=df.index, dtype=bool)
+    for coluna in list(df.columns[:3]):
+        texto = df[coluna].astype("string").fillna("").map(normalizar_texto)
+        mascara |= texto.str.match(MARCADORES_AGREGADOS, na=False)
+    return df.loc[~mascara].copy()
 
-    termos_ignorar = re.compile(
-        r"^(total|subtotal|resumo|media|fonte:|emissao:|pagina:)",
-        re.IGNORECASE,
-    )
-
-    mascara_ignorar = pd.Series(
-        False,
-        index=df.index,
-        dtype=bool,
-    )
-
-    primeiras_colunas = list(
-        df.columns[:3]
-    )
-
-    for col in primeiras_colunas:
-        texto = (
-            df[col]
-            .astype("string")
-            .fillna("")
-            .map(normalizar_texto)
+def _normalizar_datas(df: pd.DataFrame) -> pd.DataFrame:
+    if "data" in df.columns:
+        datas = pd.to_datetime(
+            df["data"].astype("string"),
+            errors="coerce",
+            dayfirst=True,
         )
+        df = df.loc[datas.notna()].copy()
+        datas = datas.loc[datas.notna()]
+        df["data"] = datas.dt.strftime("%Y-%m-%d")
+        return df
 
-        mascara_ignorar |= (
-            texto.str.match(
-                termos_ignorar,
-                na=False,
+    if "mes_referencia" in df.columns and "dia" in df.columns:
+        meses = df["mes_referencia"].astype("string").str.strip()
+        dias = df["dia"].astype("string").str.strip()
+        partes_mes = meses.str.extract(r"^(\d{4})-(\d{1,2})$")
+        dia_valido = dias.str.fullmatch(r"\d{1,2}", na=False)
+        data_texto = (
+            partes_mes[0].fillna("") + "-" +
+            partes_mes[1].fillna("").str.zfill(2) + "-" +
+            dias.where(dia_valido, "").str.zfill(2)
+        )
+        datas = pd.to_datetime(data_texto, errors="coerce", format="%Y-%m-%d")
+        df = df.loc[datas.notna()].copy()
+        datas = datas.loc[datas.notna()]
+        df["data"] = datas.dt.strftime("%Y-%m-%d")
+    return df
+
+def _normalizar_data_hora(serie: pd.Series) -> pd.Series:
+    original = serie.astype("string").str.strip()
+    datas = pd.to_datetime(original, errors="coerce")
+    resultado = datas.dt.strftime("%Y-%m-%dT%H:%M:%S").astype("string")
+    resultado = resultado.mask(original.isna() | (original == ""), pd.NA)
+    return resultado
+
+def higienizar_dataframe(df: pd.DataFrame, metadados: Dict[str, Any]) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = desduplicar_colunas([
+        normalizar_nome_coluna(coluna) for coluna in df.columns
+    ])
+    df = _remover_colunas_artificiais(df)
+
+    if df.empty:
+        df = _adicionar_metadados(df, metadados)
+        return df
+
+    df = _normalizar_valores_vazios(df)
+    df = df.dropna(how="all").copy()
+    if not df.empty:
+        df = df.dropna(axis=1, how="all").copy()
+
+    df = _remover_totais(df)
+    df = _normalizar_datas(df)
+
+    for coluna in list(df.columns):
+        base = nome_coluna_base(coluna)
+        if base in COLUNAS_DATA_HORA:
+            df[coluna] = _normalizar_data_hora(df[coluna])
+        elif base in COLUNAS_INTEIRAS:
+            df[coluna] = tentar_converter_coluna_numerica(
+                df[coluna], inteira=True
             )
-        )
-
-    if primeiras_colunas:
-        correspondencias = pd.DataFrame(
-            {
-                col: (
-                    df[col]
-                    .astype("string")
-                    .fillna("")
-                    .map(normalizar_texto)
-                    == normalizar_texto(col)
-                )
-                for col in primeiras_colunas
-            },
-            index=df.index,
-        )
-
-        quantidade_minima = (
-            2
-            if len(primeiras_colunas) >= 2
-            else 1
-        )
-
-        mascara_ignorar |= (
-            correspondencias.sum(axis=1)
-            >= quantidade_minima
-        )
-
-    df = df.loc[
-        ~mascara_ignorar
-    ].copy()
-
-    for col in df.columns:
-        if coluna_eh_texto_estrito(col):
-            df[col] = (
-                df[col]
-                .astype("string")
-                .str.strip()
-            )
-            continue
-
-        serie = (
-            df[col]
-            .astype("string")
-            .str.strip()
-        )
-
-        if coluna_eh_numerica(col):
-            serie_num = (
-                tentar_converter_coluna_numerica(
-                    serie,
-                    inteira=coluna_eh_inteira(
-                        col
-                    ),
-                )
-            )
-
-            df[col] = (
-                serie_num
-                if serie_num is not None
-                else serie
+        elif base in COLUNAS_DECIMAIS:
+            df[coluna] = tentar_converter_coluna_numerica(
+                df[coluna], inteira=False
             )
         else:
-            df[col] = serie
+            df[coluna] = df[coluna].astype("string").str.strip()
+            df[coluna] = df[coluna].mask(df[coluna] == "", pd.NA)
 
-    df["meta_tipo_relatorio"] = (
-        metadados[
-            "tipo_relatorio"
-        ]
-    )
-
-    df["meta_periodicidade"] = (
-        metadados[
-            "periodicidade"
-        ]
-    )
-
-    if metadados["ano"] is not None:
-        df["meta_ano"] = (
-            metadados["ano"]
-        )
-
-    if metadados["mes"] is not None:
-        df["meta_mes"] = (
-            metadados["mes"]
-        )
-
-    if metadados["semana"] is not None:
-        df["meta_semana"] = (
-            metadados["semana"]
-        )
-
-    if metadados["data"] is not None:
-        df["meta_data"] = (
-            metadados["data"]
-        )
-
+    df = _adicionar_metadados(df, metadados)
     return df
