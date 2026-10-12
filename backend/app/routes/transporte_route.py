@@ -22,16 +22,15 @@ def processar_html(file: UploadFile = File(...)):
         if len(conteudo_buffer) > MAX_UPLOAD_BYTES:
             raise HTTPException(
                 status_code=413,
-                detail=f"Arquivo excede o limite máximo de {MAX_UPLOAD_BYTES // (1024 * 1024)} MB."
+                detail=f"Arquivo excede o limite máximo de {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
             )
 
-    conteudo_bytes = bytes(conteudo_buffer)
-    if not conteudo_bytes:
+    if not conteudo_buffer:
         raise HTTPException(status_code=400, detail="O arquivo enviado está vazio.")
 
     try:
-        resultado = processar_html_bytes(conteudo_bytes, nome_arquivo)
+        return processar_html_bytes(bytes(conteudo_buffer), nome_arquivo)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    return resultado
+    finally:
+        file.file.close()
