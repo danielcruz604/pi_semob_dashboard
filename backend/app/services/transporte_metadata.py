@@ -4,8 +4,8 @@ from typing import Any, Dict, Optional, Tuple
 from app.services.transporte_columns import normalizar_texto
 
 def _normalizar_tipo_relatorio(nome: str) -> str:
-    texto = normalizar_texto(nome).replace(" ", "_")
-    return re.sub(r"_+", "_", texto).strip("_")
+    texto = re.sub(r"[^a-z0-9]+", "_", normalizar_texto(nome))
+    return texto.strip("_")
 
 def _inferir_periodicidade(tipo_relatorio: str) -> Optional[str]:
     partes = set(tipo_relatorio.split("_"))

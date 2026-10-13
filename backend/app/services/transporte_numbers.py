@@ -3,7 +3,14 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 import pandas as pd
 
+_MILHAR_RE = re.compile(r"[1-9]\d{0,2}(?:\.\d{3})+")
+_NULOS = {"nan", "none", "null", "na", "n/a", "-", "--"}
+
 def limpar_numero_brasileiro(valor: Any, inteira: bool = False) -> Optional[Decimal]:
+    #Converte textos numéricos (pt-BR ou en-US) em Decimal.
+    #O parâmetro `inteira` é mantido por compatibilidade: o relatório de origem
+    #usa '.' como milhar e ',' como decimal em ambos os casos.
+
     if valor is None:
         return None
     try:
@@ -13,7 +20,7 @@ def limpar_numero_brasileiro(valor: Any, inteira: bool = False) -> Optional[Deci
         pass
 
     texto = str(valor).strip()
-    if not texto or texto.lower() in {"nan", "none", "null", "na", "n/a", "-", "--"}:
+    if not texto or texto.lower() in _NULOS:
         return None
 
     negativo = False
@@ -21,27 +28,27 @@ def limpar_numero_brasileiro(valor: Any, inteira: bool = False) -> Optional[Deci
         negativo = True
         texto = texto[1:-1].strip()
 
-    texto = re.sub(r"^(?:r\$|rs\$|us\$)\s*", "", texto, flags=re.IGNORECASE)
-    texto = texto.replace("\xa0", " ").replace("%", "")
-    texto = re.sub(r"\s+", "", texto)
+    texto = re.sub(r"\s+", "", texto.replace("\xa0", " ").replace("%", ""))
 
-    if texto.startswith(("-", "+")):
-        if texto[0] == "-":
-            negativo = not negativo
-        texto = texto[1:]
+    #Sinal e moeda podem aparecer em qualquer ordem: "-R$5,00" ou "R$-5,00".
+    for _ in range(2):
+        texto = re.sub(r"^(?:r\$|rs\$|us\$)", "", texto, flags=re.IGNORECASE)
+        if texto[:1] in ("-", "+"):
+            if texto[0] == "-":
+                negativo = not negativo
+            texto = texto[1:]
     if not texto:
         return None
 
     if "." in texto and "," in texto:
-        texto = texto.replace(".", "").replace(",", ".")
+        if texto.rfind(",") > texto.rfind("."):   # 1.234,56 (pt-BR)
+            texto = texto.replace(".", "").replace(",", ".")
+        else:                                       # 1,234.56 (en-US)
+            texto = texto.replace(",", "")
     elif "," in texto:
-        texto = texto.replace(",", ".")
-    elif "." in texto:
-        if inteira:
-            if re.fullmatch(r"\d{1,3}(?:\.\d{3})+", texto):
-                texto = texto.replace(".", "")
-        elif re.fullmatch(r"\d{1,3}(?:\.\d{3})+", texto):
-            texto = texto.replace(".", "")
+        texto = texto.replace(",", ".")             # múltiplas vírgulas falham no regex abaixo
+    elif "." in texto and _MILHAR_RE.fullmatch(texto):
+        texto = texto.replace(".", "")
 
     if not re.fullmatch(r"\d+(?:\.\d+)?", texto):
         return None
@@ -50,21 +57,15 @@ def limpar_numero_brasileiro(valor: Any, inteira: bool = False) -> Optional[Deci
         numero = Decimal(texto)
     except InvalidOperation:
         return None
-
-    if negativo:
-        numero = -numero
-    return numero
+    return -numero if negativo else numero
 
 def tentar_converter_coluna_numerica(serie: pd.Series, inteira: bool = False) -> pd.Series:
-    valores = serie.apply(lambda valor: limpar_numero_brasileiro(valor, inteira=inteira))
+    valores = [limpar_numero_brasileiro(v, inteira=inteira) for v in serie]
     if inteira:
-        return pd.Series(
-            [None if valor is None else int(valor) if valor == valor.to_integral_value() else float(valor) for valor in valores],
-            index=serie.index,
-            dtype=object,
-        )
-    return pd.Series(
-        [None if valor is None else float(valor) for valor in valores],
-        index=serie.index,
-        dtype=object,
-    )
+        convertidos = [
+            None if v is None else int(v) if v == v.to_integral_value() else float(v)
+            for v in valores
+        ]
+    else:
+        convertidos = [None if v is None else float(v) for v in valores]
+    return pd.Series(convertidos, index=serie.index, dtype=object)

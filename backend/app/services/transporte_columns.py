@@ -134,6 +134,8 @@ ALIASES_COLUNAS = {
     "receita_total": "receita_total",
     "total_veiculos": "total_veiculos",
     "total_viagens": "total_viagens",
+    "nr_viagens_prog": "viagens_programadas",
+    "nr_total_viagens_realizadas": "viagens_realizadas",
 }
 
 def normalizar_texto(valor: Any) -> str:
@@ -182,18 +184,17 @@ def normalizar_nome_coluna(coluna: Any) -> str:
     return texto
 
 def desduplicar_colunas(colunas: List[str]) -> List[str]:
-    vistas: Dict[str, int] = {}
+    usados: set = set()
+    contadores: Dict[str, int] = {}
     novas_colunas: List[str] = []
     for col in colunas:
-        nome = col.strip() if col else "coluna"
-        if not nome:
-            nome = "coluna"
-        if nome in vistas:
-            vistas[nome] += 1
-            novas_colunas.append(f"{nome}_{vistas[nome]}")
-        else:
-            vistas[nome] = 0
-            novas_colunas.append(nome)
+        base = (col or "").strip() or "coluna"
+        nome = base
+        while nome in usados:
+            contadores[base] = contadores.get(base, 0) + 1
+            nome = f"{base}_{contadores[base]}"
+        usados.add(nome)
+        novas_colunas.append(nome)
     return novas_colunas
 
 def nome_coluna_base(coluna: str) -> str:
