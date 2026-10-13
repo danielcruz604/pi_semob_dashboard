@@ -25,3 +25,11 @@ class RespostaProcessamentoSchema(BaseModel):
     dados: List[Dict[str, Any]]
     conjuntos_dados: Optional[List[ConjuntoDadosSchema]] = None
     total_registros_conjuntos: Optional[int] = None
+
+class PersistenciaSchema(BaseModel):
+    colecao: str
+    documentos_afetados: int
+    registros_descartados: Optional[int] = None
+
+class RespostaProcessamentoEPersistenciaSchema(RespostaProcessamentoSchema):
+    persistencia: Optional[PersistenciaSchema] = None
