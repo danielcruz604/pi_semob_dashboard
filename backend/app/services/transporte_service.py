@@ -1,11 +1,36 @@
 import json
+import logging
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
+from pymongo.database import Database
 from app.services.transporte_cleaner import higienizar_dataframe
-from app.services.transporte_columns import normalizar_nome_coluna
+from app.services.transporte_mapper import (
+    mapear_financeiro_sistema,
+    mapear_passageiros_sistema,
+    mapear_viagens_horario,
+    mapear_viagens_linhas,
+    mapear_viagens_ocorrencias,
+    mapear_viagens_sistema,
+)
 from app.services.transporte_metadata import extrair_metadados_nome_arquivo
+from app.services.transporte_repository import (
+    COL_FINANCEIRO_SISTEMA,
+    COL_PASSAGEIROS_SISTEMA,
+    COL_VIAGENS_HORARIO,
+    COL_VIAGENS_LINHAS,
+    COL_VIAGENS_OCORRENCIAS,
+    COL_VIAGENS_SISTEMA,
+    upsert_financeiro_sistema,
+    upsert_passageiros_sistema,
+    upsert_viagens_horario,
+    upsert_viagens_linhas,
+    upsert_viagens_ocorrencias,
+    upsert_viagens_sistema,
+)
 from app.services.transporte_tables import ler_tabelas_html
+
+logger = logging.getLogger(__name__)
 
 def _nome_conjunto_dados(tipo_relatorio: str, df: pd.DataFrame, indice: int) -> str:
     colunas = set(df.columns)
@@ -21,43 +46,37 @@ def _nome_conjunto_dados(tipo_relatorio: str, df: pd.DataFrame, indice: int) -> 
 def _converter_para_registros(df: pd.DataFrame) -> List[Dict[str, Any]]:
     if df.empty:
         return []
-    json_texto = df.to_json(
-        orient="records",
-        date_format="iso",
-        force_ascii=False,
-        double_precision=15,
+    return json.loads(
+        df.to_json(orient="records", date_format="iso", force_ascii=False, double_precision=15)
     )
-    return json.loads(json_texto)
 
 def _atualizar_intervalo_datas(metadados: Dict[str, Any], dataframes: List[pd.DataFrame]) -> None:
-    datas = []
-    for df in dataframes:
-        if "data" not in df.columns or df.empty:
-            continue
-        serie = pd.to_datetime(df["data"], errors="coerce")
-        datas.extend(serie.dropna().dt.strftime("%Y-%m-%d").tolist())
-    if datas:
-        metadados["data_inicio"] = min(datas)
-        metadados["data_fim"] = max(datas)
+    series = [
+        pd.to_datetime(df["data"], errors="coerce")
+        for df in dataframes
+        if "data" in df.columns and not df.empty
+    ]
+    if not series:
+        return
+    datas = pd.concat(series).dropna()
+    if not datas.empty:
+        metadados["data_inicio"] = datas.min().strftime("%Y-%m-%d")
+        metadados["data_fim"] = datas.max().strftime("%Y-%m-%d")
 
-def processar_html_bytes(conteudo_bytes: bytes, nome_arquivo: str) -> Dict[str, Any]:
+def _construir_conjuntos(
+    conteudo_bytes: bytes, nome_arquivo: str
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     tabelas = ler_tabelas_html(conteudo_bytes)
     metadados = extrair_metadados_nome_arquivo(nome_arquivo)
-
-    dataframes = [
-        higienizar_dataframe(tabela, metadados)
-        for tabela in tabelas
-    ]
+    dataframes = [higienizar_dataframe(tabela, metadados) for tabela in tabelas]
+    if not dataframes:
+        raise ValueError("Nenhuma tabela pôde ser processada.")
     _atualizar_intervalo_datas(metadados, dataframes)
 
-    conjuntos = []
+    conjuntos: List[Dict[str, Any]] = []
     nomes_usados = set()
     for indice, df in enumerate(dataframes, start=1):
-        nome = _nome_conjunto_dados(
-            metadados["tipo_relatorio"],
-            df,
-            indice,
-        )
+        nome = _nome_conjunto_dados(metadados["tipo_relatorio"], df, indice)
         if nome in nomes_usados:
             nome = f"{nome}_{indice}"
         nomes_usados.add(nome)
@@ -68,20 +87,95 @@ def processar_html_bytes(conteudo_bytes: bytes, nome_arquivo: str) -> Dict[str, 
             "total_registros_validos": len(registros),
             "dados": registros,
         })
+    return metadados, conjuntos
 
-    conjunto_principal = conjuntos[0]
-    resultado = {
+def _montar_resposta(
+    nome_arquivo: str, metadados: Dict[str, Any], conjuntos: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    principal = conjuntos[0]
+    resultado: Dict[str, Any] = {
         "arquivo": nome_arquivo,
         "metadados": metadados,
-        "total_registros_validos": conjunto_principal["total_registros_validos"],
-        "colunas": conjunto_principal["colunas"],
-        "dados": conjunto_principal["dados"],
+        "total_registros_validos": principal["total_registros_validos"],
+        "colunas": principal["colunas"],
+        "dados": principal["dados"],
     }
-
     if len(conjuntos) > 1:
         resultado["conjuntos_dados"] = conjuntos
         resultado["total_registros_conjuntos"] = sum(
-            conjunto["total_registros_validos"] for conjunto in conjuntos
+            c["total_registros_validos"] for c in conjuntos
         )
+    return resultado
 
+def processar_html_bytes(conteudo_bytes: bytes, nome_arquivo: str) -> Dict[str, Any]:
+    metadados, conjuntos = _construir_conjuntos(conteudo_bytes, nome_arquivo)
+    return _montar_resposta(nome_arquivo, metadados, conjuntos)
+
+
+def _persistir(
+    db: Database, tipo: str, conjuntos: List[Dict[str, Any]]
+) -> Tuple[str, int, Optional[int]]:
+    """Despacha para o mapper/repositório corretos. Retorna (coleção, afetados, descartados)."""
+    dados = conjuntos[0]["dados"]
+
+    if "saldo" in tipo:
+        creditos = movimentacoes = None
+        for c in conjuntos:
+            if c["nome"].startswith("saldos_creditos"):
+                creditos = c["dados"]
+            elif c["nome"].startswith("saldos_movimentacoes"):
+                movimentacoes = c["dados"]
+        if creditos is None and movimentacoes is None:
+            raise ValueError("Relatório de saldos sem tabelas de créditos ou movimentações reconhecidas.")
+        docs = mapear_financeiro_sistema(creditos, movimentacoes)
+        return COL_FINANCEIRO_SISTEMA, upsert_financeiro_sistema(db, docs), None
+
+    if "passageiros" in tipo:
+        docs = mapear_passageiros_sistema(dados)
+        return COL_PASSAGEIROS_SISTEMA, upsert_passageiros_sistema(db, docs), len(dados) - len(docs)
+
+    if "linhas" in tipo:
+        docs = mapear_viagens_linhas(dados)
+        return COL_VIAGENS_LINHAS, upsert_viagens_linhas(db, docs), len(dados) - len(docs)
+
+    if "fxhr" in tipo or "horario" in tipo:
+        docs = mapear_viagens_horario(dados)
+        return COL_VIAGENS_HORARIO, upsert_viagens_horario(db, docs), len(dados) - len(docs)
+
+    if "viag_" in tipo or "ninic" in tipo or "nrealiz" in tipo or "nterm" in tipo:
+        classificacao = "NaoIniciada"
+        if "nrealiz" in tipo:
+            classificacao = "NaoRealizada"
+        elif "nterm" in tipo:
+            classificacao = "NaoTerminada"
+        docs = mapear_viagens_ocorrencias(dados, classificacao_padrao=classificacao)
+        return COL_VIAGENS_OCORRENCIAS, upsert_viagens_ocorrencias(db, docs), len(dados) - len(docs)
+
+    if "mensal" in tipo or "fcv" in tipo:
+        # Mensal e Mensal_FCV usam o mesmo mapper; cada arquivo atualiza só os campos que possui.
+        docs = mapear_viagens_sistema(dados)
+        return COL_VIAGENS_SISTEMA, upsert_viagens_sistema(db, docs), len(dados) - len(docs)
+
+    raise ValueError(f"Tipo de relatório '{tipo}' não possui mapeamento de persistência.")
+
+def processar_e_persistir_html_bytes(
+    conteudo_bytes: bytes, nome_arquivo: str, db: Optional[Database] = None
+) -> Dict[str, Any]:
+    #Processa o HTML e persiste no MongoDB. `db` pode ser injetado (testes).
+    metadados, conjuntos = _construir_conjuntos(conteudo_bytes, nome_arquivo)
+    resultado = _montar_resposta(nome_arquivo, metadados, conjuntos)
+
+    if db is None:
+        from app.utils.connection_factory import ConnectionFactory  # import tardio: desacopla testes unitários
+        db = ConnectionFactory().db
+
+    colecao, afetados, descartados = _persistir(db, metadados["tipo_relatorio"], conjuntos)
+    if descartados:
+        logger.warning("%s: %d registros descartados (chave/data inválida).", nome_arquivo, descartados)
+
+    resultado["persistencia"] = {
+        "colecao": colecao,
+        "documentos_afetados": afetados,
+        "registros_descartados": descartados,
+    }
     return resultado
