@@ -1,6 +1,10 @@
 from app.services.transporte_metadata import extrair_metadados_nome_arquivo
 from app.services.transporte_numbers import limpar_numero_brasileiro
 from app.services.transporte_service import processar_html_bytes
+from app.services.transporte_columns import desduplicar_colunas
+from app.services.transporte_mapper import (
+    mapear_financeiro_sistema, mapear_viagens_horario, mapear_viagens_linhas, mapear_viagens_sistema,
+)
 
 def teste_conversao_numerica_brasileira():
     assert limpar_numero_brasileiro("5.168", inteira=True) == 5168
@@ -54,3 +58,36 @@ def teste_multiplos_conjuntos_e_saldo_negativo():
     movimento = resultado["conjuntos_dados"][1]["dados"][0]
     assert movimento["credito_circulante"] == -3380.0
     assert resultado["conjuntos_dados"][0]["dados"][0]["saldo_final"] == 20434667.35
+
+def teste_zero_a_esquerda_nao_e_milhar():
+    assert float(limpar_numero_brasileiro("0.500")) == 0.5
+    assert float(limpar_numero_brasileiro("1,234.56")) == 1234.56
+    assert float(limpar_numero_brasileiro("-R$ 5,00")) == -5.0
+
+def teste_desduplicar_sem_colisao():
+    assert desduplicar_colunas(["a", "a", "a_1"]) == ["a", "a_1", "a_1_1"]
+
+def teste_mapper_nao_gera_string_none():
+    assert mapear_viagens_linhas([{"data": "2026-08-01", "linha": None}]) == []
+
+def teste_mapper_horario_extrai_hora_de_texto():
+    docs = mapear_viagens_horario([{
+        "data": "2026-08-01", "linha": "01", "faixa_horaria": "05:00 - 05:59",
+        "viagens": 4, "partidas": "05:10, 05:25",
+    }])
+    assert docs[0]["hora"] == 5 and docs[0]["partidas"] == ["05:10", "05:25"]
+
+def teste_financeiro_usa_mes_dia_e_chave_camel():
+    docs = mapear_financeiro_sistema(
+        [{"mes_referencia": "2026-08", "dia": "02", "serie": "1",
+          "creditos_transferidos_para_cartoes": 4805.0, "saldo_final": 20434667.35}],
+        [{"mes_referencia": "2026-08", "dia": "02", "total_vendas": 0.0}],
+    )
+    assert docs[0]["creditosTransferidosParaCartoes"] == 4805.0
+    assert docs[0]["totalVendas"] == 0.0
+
+def teste_mapper_sistema_parcial_nao_zera_campos():
+    docs = mapear_viagens_sistema([{"data": "2026-08-01", "viagens_programadas_manha": 10,
+                                    "viagens_realizadas_manha": 9}])
+    assert "nrViagensProg" not in docs[0]
+    assert docs[0]["fcvPorPeriodo"]["manha"]["fcv"] == 0.9
