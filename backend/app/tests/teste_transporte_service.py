@@ -2,6 +2,8 @@ from app.services.transporte_metadata import extrair_metadados_nome_arquivo
 from app.services.transporte_numbers import limpar_numero_brasileiro
 from app.services.transporte_service import processar_html_bytes
 from app.services.transporte_columns import desduplicar_colunas
+from app.services.transporte_service import _classificar_relatorio
+from app.services.transporte_mapper import mapear_viagens_horario as _horario
 from app.services.transporte_mapper import (
     mapear_financeiro_sistema, mapear_viagens_horario, mapear_viagens_linhas, mapear_viagens_sistema,
 )
@@ -72,10 +74,10 @@ def teste_mapper_nao_gera_string_none():
 
 def teste_mapper_horario_extrai_hora_de_texto():
     docs = mapear_viagens_horario([{
-        "data": "2026-08-01", "linha": "01", "faixa_horaria": "05:00 - 05:59",
-        "viagens": 4, "partidas": "05:10, 05:25",
+        "data": "2026-08-01", "linha": "01", "faixa_horaria": "5hs",
+        "viagens": 2, "partidas": "10 > 25",
     }])
-    assert docs[0]["hora"] == 5 and docs[0]["partidas"] == ["05:10", "05:25"]
+    assert docs[0]["hora"] == 5 and docs[0]["partidas"] == [10, 25]
 
 def teste_financeiro_usa_mes_dia_e_chave_camel():
     docs = mapear_financeiro_sistema(
@@ -91,3 +93,20 @@ def teste_mapper_sistema_parcial_nao_zera_campos():
                                     "viagens_realizadas_manha": 9}])
     assert "nrViagensProg" not in docs[0]
     assert docs[0]["fcvPorPeriodo"]["manha"]["fcv"] == 0.9
+
+def teste_partidas_com_separador_maior_que():
+    docs = _horario([{"data": "2026-08-01", "linha": "01", "faixa_horaria": "4hs", "partidas": "34 > 57 > 59"}])
+    assert docs[0]["hora"] == 4 and docs[0]["partidas"] == [34, 57, 59]
+
+def teste_classificacao_dos_nomes_reais():
+    esperado = {
+        "mensal": "resumo_geral", "mensal_fcv": "resumo_geral", "quinzenal": "resumo_geral",
+        "quinzenal_fcv": "resumo_geral", "mensal_fxhr": "fxhr", "quinzenal_fxhr": "fxhr",
+        "mensal_resumo_fxhr": "resumo_fxhr", "mensal_viagens": "viagens_detalhe",
+        "quinzenal_viagens": "viagens_detalhe", "mensal_linhas": "linhas",
+        "mensal_viag_ninic": "ocorrencias", "quinzenal_viag_nrealiz": "ocorrencias",
+        "mensal_viag_nterm": "ocorrencias", "passageiros": "passageiros",
+        "passageiros_quinzenal": "passageiros", "saldos": "saldos", "saldos_mensal": "saldos",
+    }
+    for tipo, cat in esperado.items():
+        assert _classificar_relatorio(tipo) == cat, tipo
