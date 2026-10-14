@@ -111,14 +111,47 @@ def processar_html_bytes(conteudo_bytes: bytes, nome_arquivo: str) -> Dict[str, 
     metadados, conjuntos = _construir_conjuntos(conteudo_bytes, nome_arquivo)
     return _montar_resposta(nome_arquivo, metadados, conjuntos)
 
+_PERIODOS = {"mensal", "quinzenal", "semanal", "diario", "diaria"}
+_OCORRENCIAS = {"ninic": "NaoIniciada", "nrealiz": "NaoRealizada", "nterm": "NaoTerminada"}
+
+def _classificar_relatorio(tipo: str) -> str:
+    #Classifica pelo conjunto de palavras do tipo (e não por substring)
+    partes = set(tipo.split("_"))
+    if partes & {"saldo", "saldos"}:
+        return "saldos"
+    if "passageiros" in partes:
+        return "passageiros"
+    if "linhas" in partes:
+        return "linhas"
+    if "fxhr" in partes:
+        return "resumo_fxhr" if "resumo" in partes else "fxhr"
+    if "viag" in partes and partes & set(_OCORRENCIAS):
+        return "ocorrencias"
+    if "viagens" in partes:
+        return "viagens_detalhe"
+    if partes & _PERIODOS and not (partes - _PERIODOS - {"fcv"}):
+        return "resumo_geral"
+    return "desconhecido"
+
+_SEM_COLECAO = {
+    "resumo_fxhr": "resumo por faixa horária (sem coleção de destino definida)",
+    "viagens_detalhe": "viagens detalhadas por trecho (sem coleção de destino definida)",
+}
 
 def _persistir(
     db: Database, tipo: str, conjuntos: List[Dict[str, Any]]
 ) -> Tuple[str, int, Optional[int]]:
-    """Despacha para o mapper/repositório corretos. Retorna (coleção, afetados, descartados)."""
+    #Despacha para o mapper/repositório corretos. Retorna (coleção, afetados, descartados).
+    categoria = _classificar_relatorio(tipo)
     dados = conjuntos[0]["dados"]
 
-    if "saldo" in tipo:
+    if categoria in _SEM_COLECAO:
+        raise ValueError(
+            f"Relatório '{tipo}' reconhecido como {_SEM_COLECAO[categoria]}; "
+            "use /processar-html para apenas processá-lo."
+        )
+
+    if categoria == "saldos":
         creditos = movimentacoes = None
         for c in conjuntos:
             if c["nome"].startswith("saldos_creditos"):
@@ -130,29 +163,25 @@ def _persistir(
         docs = mapear_financeiro_sistema(creditos, movimentacoes)
         return COL_FINANCEIRO_SISTEMA, upsert_financeiro_sistema(db, docs), None
 
-    if "passageiros" in tipo:
+    if categoria == "passageiros":
         docs = mapear_passageiros_sistema(dados)
         return COL_PASSAGEIROS_SISTEMA, upsert_passageiros_sistema(db, docs), len(dados) - len(docs)
 
-    if "linhas" in tipo:
+    if categoria == "linhas":
         docs = mapear_viagens_linhas(dados)
         return COL_VIAGENS_LINHAS, upsert_viagens_linhas(db, docs), len(dados) - len(docs)
 
-    if "fxhr" in tipo or "horario" in tipo:
+    if categoria == "fxhr":
         docs = mapear_viagens_horario(dados)
         return COL_VIAGENS_HORARIO, upsert_viagens_horario(db, docs), len(dados) - len(docs)
 
-    if "viag_" in tipo or "ninic" in tipo or "nrealiz" in tipo or "nterm" in tipo:
-        classificacao = "NaoIniciada"
-        if "nrealiz" in tipo:
-            classificacao = "NaoRealizada"
-        elif "nterm" in tipo:
-            classificacao = "NaoTerminada"
+    if categoria == "ocorrencias":
+        classificacao = next(v for k, v in _OCORRENCIAS.items() if k in tipo.split("_"))
         docs = mapear_viagens_ocorrencias(dados, classificacao_padrao=classificacao)
         return COL_VIAGENS_OCORRENCIAS, upsert_viagens_ocorrencias(db, docs), len(dados) - len(docs)
 
-    if "mensal" in tipo or "fcv" in tipo:
-        # Mensal e Mensal_FCV usam o mesmo mapper; cada arquivo atualiza só os campos que possui.
+    if categoria == "resumo_geral":
+        #Resumo (Mensal/Quinzenal) e FCV usam o mesmo mapper; cada arquivo atualiza só os campos que possui.
         docs = mapear_viagens_sistema(dados)
         return COL_VIAGENS_SISTEMA, upsert_viagens_sistema(db, docs), len(dados) - len(docs)
 
