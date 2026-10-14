@@ -1,0 +1,1542 @@
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:fl_chart/fl_chart.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'local_data_loader.dart';
+import 'login_page.dart';
+
+enum ModoAnalise { extratoPeriodo, compararDiasSemana }
+
+class DashboardPage extends StatefulWidget {
+  const DashboardPage({super.key});
+
+  @override
+  State<DashboardPage> createState() => _DashboardPageState();
+}
+
+class _DashboardPageState extends State<DashboardPage> {
+  SemobDataset _dataset = SemobDataset();
+  bool _carregando = false;
+  String? _origemCarregada;
+
+  String _mesSelecionado = 'Agosto/2026';
+  String _periodicidade = 'Quinzenal';
+  String? _linhaSelecionada;
+
+  ModoAnalise _modoAtivo = ModoAnalise.extratoPeriodo;
+
+  DateTime? _dataInicio;
+  DateTime? _dataFim;
+  String _presetPeriodo = 'Mês Todo';
+
+  int _diaSemanaComparar = 1;
+  Set<String> _datasMarcadasComparacao = {};
+
+  static const Map<int, String> _nomesCurtoDia = {
+    1: 'Seg',
+    2: 'Ter',
+    3: 'Qua',
+    4: 'Qui',
+    5: 'Sex',
+    6: 'Sáb',
+    7: 'Dom',
+  };
+
+  static const Map<int, String> _nomesLongoDia = {
+    1: 'Segunda-feira',
+    2: 'Terça-feira',
+    3: 'Quarta-feira',
+    4: 'Quinta-feira',
+    5: 'Sexta-feira',
+    6: 'Sábado',
+    7: 'Domingo',
+  };
+
+  static const Map<int, String> _mapaMesNumeroParaNome = {
+    1: 'Janeiro',
+    2: 'Fevereiro',
+    3: 'Março',
+    4: 'Abril',
+    5: 'Maio',
+    6: 'Junho',
+    7: 'Julho',
+    8: 'Agosto',
+    9: 'Setembro',
+    10: 'Outubro',
+    11: 'Novembro',
+    12: 'Dezembro',
+  };
+
+  /// Abre o seletor nativo de pastas no Windows, macOS, Linux, iOS e Android.
+  /// Na Web (Chrome/Edge), abre diretamente o seletor de múltiplos arquivos.
+  Future<void> _selecionarPastaUnificada() async {
+    if (kIsWeb) {
+      await _selecionarMultiplosArquivos();
+      return;
+    }
+
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      var status = await Permission.manageExternalStorage.status;
+      if (!status.isGranted) {
+        status = await Permission.manageExternalStorage.request();
+      }
+      if (!status.isGranted) {
+        await Permission.storage.request();
+      }
+    }
+
+    final path = await FilePicker.getDirectoryPath(
+      dialogTitle: 'Selecione a pasta de relatórios da SEMOB',
+    );
+    if (path == null) return;
+
+    final nomeCurto = LocalDataLoader.extrairNomeCurtoPasta(path);
+
+    setState(() {
+      _carregando = true;
+      _origemCarregada = nomeCurto;
+    });
+
+    final ds = await LocalDataLoader.carregarPasta(path);
+    _aplicarDatasetCarregado(ds);
+  }
+
+  /// Seleção direta de múltiplos arquivos .HTML (Funciona em todas as 6 plataformas)
+  Future<void> _selecionarMultiplosArquivos() async {
+    final files = await FilePicker.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['html', 'htm'],
+      dialogTitle: 'Selecione os arquivos HTML da SEMOB',
+    );
+
+    if (files.isEmpty) return;
+
+    setState(() {
+      _carregando = true;
+      _origemCarregada = '${files.length} arq.';
+    });
+
+    final ds = await LocalDataLoader.carregarArquivosSelecionados(files);
+    _aplicarDatasetCarregado(ds);
+  }
+
+  void _aplicarDatasetCarregado(SemobDataset ds) {
+    if (ds.isEmpty && mounted) {
+      setState(() => _carregando = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Nenhum relatório válido encontrado. Tente selecionar os arquivos .HTML diretamente.'),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+      return;
+    }
+
+    final mesInicial = ds.mesesDisponiveis.isNotEmpty ? ds.mesesDisponiveis.first : 'Agosto/2026';
+    final perInicial = _obterPeriodicidadeValida(ds, mesInicial, 'Mensal');
+
+    setState(() {
+      _dataset = ds;
+      _carregando = false;
+      _mesSelecionado = mesInicial;
+      _periodicidade = perInicial;
+      _linhaSelecionada = null;
+      _recalcularLimitesData();
+      _atualizarChipsDiaSemana(_diaSemanaComparar, mudarModo: false);
+    });
+  }
+
+  String _obterPeriodicidadeValida(SemobDataset ds, String mesAlvo, String preferida) {
+    final temPreferida = ds.resumos.any((e) => e.mesAno == mesAlvo && e.periodicidade == preferida) ||
+        ds.passageiros.any((e) => e.mesAno == mesAlvo && e.periodicidade == preferida) ||
+        ds.faixasHorarias.any((e) => e.mesAno == mesAlvo && e.periodicidade == preferida);
+
+    if (temPreferida) return preferida;
+
+    final outra = preferida == 'Mensal' ? 'Quinzenal' : 'Mensal';
+    final temOutra = ds.resumos.any((e) => e.mesAno == mesAlvo && e.periodicidade == outra) ||
+        ds.passageiros.any((e) => e.mesAno == mesAlvo && e.periodicidade == outra) ||
+        ds.faixasHorarias.any((e) => e.mesAno == mesAlvo && e.periodicidade == outra);
+
+    return temOutra ? outra : preferida;
+  }
+
+  void _sincronizarMesPelaData(DateTime dtEscolhida) {
+    final nomeMes = '${_mapaMesNumeroParaNome[dtEscolhida.month]}/${dtEscolhida.year}';
+    if (_dataset.mesesDisponiveis.contains(nomeMes)) {
+      _mesSelecionado = nomeMes;
+      _periodicidade = _obterPeriodicidadeValida(_dataset, _mesSelecionado, _periodicidade);
+    }
+  }
+
+  List<DateTime> _todasAsDatasGlobal() {
+    final setDt = <DateTime>{
+      ..._dataset.resumos.map((e) => e.dateTime),
+      ..._dataset.passageiros.map((e) => e.dateTime),
+      ..._dataset.faixasHorarias.map((e) => e.dateTime),
+    };
+    final lista = setDt.toList()..sort();
+    return lista;
+  }
+
+  List<DateTime> _todasAsDatasDoEscopo() {
+    final setDt = <DateTime>{
+      ..._dataset.resumos
+          .where((e) => e.mesAno == _mesSelecionado && e.periodicidade == _periodicidade)
+          .map((e) => e.dateTime),
+      ..._dataset.passageiros
+          .where((e) => e.mesAno == _mesSelecionado && e.periodicidade == _periodicidade)
+          .map((e) => e.dateTime),
+      ..._dataset.faixasHorarias
+          .where((e) => e.mesAno == _mesSelecionado && e.periodicidade == _periodicidade)
+          .map((e) => e.dateTime),
+    };
+    final lista = setDt.toList()..sort();
+    return lista;
+  }
+
+  void _recalcularLimitesData() {
+    final dts = _todasAsDatasDoEscopo();
+    if (dts.isNotEmpty) {
+      _dataInicio = dts.first;
+      _dataFim = dts.last;
+    }
+    _presetPeriodo = 'Mês Todo';
+  }
+
+  void _atualizarChipsDiaSemana(int weekday, {bool mudarModo = true}) {
+    final dts = _todasAsDatasDoEscopo().where((dt) => dt.weekday == weekday).toList();
+    setState(() {
+      _diaSemanaComparar = weekday;
+      if (mudarModo) _modoAtivo = ModoAnalise.compararDiasSemana;
+      _datasMarcadasComparacao = dts.map(_fmtDataBR).toSet();
+    });
+  }
+
+  bool _dataPassaNoFiltro(String dataStr, DateTime dt) {
+    if (_modoAtivo == ModoAnalise.extratoPeriodo) {
+      if (_dataInicio != null) {
+        final inicioLimpo = DateTime(_dataInicio!.year, _dataInicio!.month, _dataInicio!.day);
+        if (dt.isBefore(inicioLimpo)) return false;
+      }
+      if (_dataFim != null) {
+        final fimLimpo = DateTime(_dataFim!.year, _dataFim!.month, _dataFim!.day, 23, 59, 59);
+        if (dt.isAfter(fimLimpo)) return false;
+      }
+      return true;
+    } else {
+      return _datasMarcadasComparacao.contains(dataStr);
+    }
+  }
+
+  static String _fmtDataBR(DateTime d) =>
+      '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year}';
+
+  static String _fmtCurto(String dataBR) => dataBR.length >= 5 ? dataBR.substring(0, 5) : dataBR;
+
+  static DateTime _parseStrToDate(String s) {
+    final p = s.split('/');
+    if (p.length != 3) return DateTime(2026);
+    return DateTime(int.parse(p[2]), int.parse(p[1]), int.parse(p[0]));
+  }
+
+  void _sairParaTelaDeLogin() {
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => const LoginPage()),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final resumosFiltrados = _dataset.resumos
+        .where((e) => e.periodicidade == _periodicidade && _dataPassaNoFiltro(e.data, e.dateTime))
+        .toList()
+      ..sort((a, b) => a.dateTime.compareTo(b.dateTime));
+
+    final passageirosFiltrados = _dataset.passageiros
+        .where((e) => e.periodicidade == _periodicidade && _dataPassaNoFiltro(e.data, e.dateTime))
+        .toList()
+      ..sort((a, b) => a.dateTime.compareTo(b.dateTime));
+
+    final fcvFiltrados = _dataset.fcv
+        .where((e) => e.periodicidade == _periodicidade && _dataPassaNoFiltro(e.data, e.dateTime))
+        .toList()
+      ..sort((a, b) => a.dateTime.compareTo(b.dateTime));
+
+    final fxHrFiltrados = _dataset.faixasHorarias
+        .where((e) =>
+            e.periodicidade == _periodicidade &&
+            (_linhaSelecionada == null || e.linha == _linhaSelecionada) &&
+            _dataPassaNoFiltro(e.data, e.dateTime))
+        .toList();
+
+    final linhasFiltradas = _dataset.linhas
+        .where((e) =>
+            e.periodicidade == _periodicidade &&
+            (_linhaSelecionada == null || e.linha == _linhaSelecionada) &&
+            _dataPassaNoFiltro(e.data, e.dateTime))
+        .toList();
+
+    return Scaffold(
+      backgroundColor: const Color(0xFFF1F5F9),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF0F172A),
+        foregroundColor: Colors.white,
+        elevation: 0,
+        toolbarHeight: 54,
+        title: const Row(
+          children: [
+            Icon(Icons.directions_bus_filled_rounded, color: Color(0xFF38BDF8), size: 22),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'SEMOB • Monitoramento',
+                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          if (!kIsWeb)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF0284C7),
+                  foregroundColor: Colors.white,
+                  elevation: 0,
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                ),
+                onPressed: _carregando ? null : _selecionarPastaUnificada,
+                icon: const Icon(Icons.folder_open_rounded, size: 16),
+                label: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 120),
+                  child: Text(
+                    _origemCarregada == null ? 'Abrir Pasta' : _origemCarregada!,
+                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ),
+            ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+            child: OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(
+                foregroundColor: Colors.white,
+                side: const BorderSide(color: Color(0xFF38BDF8)),
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+              ),
+              onPressed: _carregando ? null : _selecionarMultiplosArquivos,
+              icon: const Icon(Icons.file_present_rounded, size: 15, color: Color(0xFF38BDF8)),
+              label: const Text('HTMLs', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+            ),
+          ),
+          IconButton(
+            tooltip: 'Sair / Trocar Operador',
+            icon: const Icon(Icons.logout_rounded, color: Colors.white70, size: 20),
+            onPressed: _sairParaTelaDeLogin,
+          ),
+          const SizedBox(width: 6),
+        ],
+      ),
+      body: _carregando
+          ? const Center(child: CircularProgressIndicator())
+          : _dataset.isEmpty
+              ? _buildEmptyState()
+              : LayoutBuilder(
+                  builder: (context, constraints) {
+                    final isWide = constraints.maxWidth >= 850;
+                    return SingleChildScrollView(
+                      padding: const EdgeInsets.all(14),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          _buildBarraTopoSlim(),
+                          const SizedBox(height: 14),
+                          _buildKPIsResponsivo(
+                            isWide,
+                            resumosFiltrados,
+                            passageirosFiltrados,
+                            fxHrFiltrados,
+                            linhasFiltradas,
+                          ),
+                          const SizedBox(height: 14),
+                          if (isWide) ...[
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Expanded(
+                                  child: _buildGraficoViagensEQuilometragem(resumosFiltrados, fxHrFiltrados, linhasFiltradas),
+                                ),
+                                const SizedBox(width: 14),
+                                Expanded(
+                                  child: _buildGraficoPassageiros(passageirosFiltrados),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 14),
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Expanded(
+                                  child: _buildGraficoFaixaHoraria(fxHrFiltrados),
+                                ),
+                                const SizedBox(width: 14),
+                                Expanded(
+                                  child: _buildGraficoTurnosERanking(fcvFiltrados, fxHrFiltrados),
+                                ),
+                              ],
+                            ),
+                          ] else ...[
+                            _buildGraficoViagensEQuilometragem(resumosFiltrados, fxHrFiltrados, linhasFiltradas),
+                            const SizedBox(height: 14),
+                            _buildGraficoPassageiros(passageirosFiltrados),
+                            const SizedBox(height: 14),
+                            _buildGraficoFaixaHoraria(fxHrFiltrados),
+                            const SizedBox(height: 14),
+                            _buildGraficoTurnosERanking(fcvFiltrados, fxHrFiltrados),
+                          ],
+                          const SizedBox(height: 14),
+                          _buildTabelaResumo(resumosFiltrados, passageirosFiltrados),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+    );
+  }
+
+  Widget _buildEmptyState() {
+    return Center(
+      child: Container(
+        margin: const EdgeInsets.all(20),
+        padding: const EdgeInsets.all(28),
+        constraints: const BoxConstraints(maxWidth: 460),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 12)],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.analytics_outlined, size: 64, color: Color(0xFF0284C7)),
+            const SizedBox(height: 16),
+            const Text(
+              'Painel de Mobilidade SEMOB',
+              style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              kIsWeb
+                  ? 'No navegador, clique abaixo e selecione todos os arquivos .HTML (Ctrl + A) que deseja analisar.'
+                  : 'Selecione a pasta contendo os relatórios (Mensal / Quinzenal) ou escolha os arquivos .HTML diretamente.',
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.blueGrey, fontSize: 13),
+            ),
+            const SizedBox(height: 24),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              alignment: WrapAlignment.center,
+              children: [
+                if (!kIsWeb)
+                  ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF0284C7),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                    ),
+                    onPressed: _selecionarPastaUnificada,
+                    icon: const Icon(Icons.folder_open),
+                    label: const Text('Selecionar Pasta'),
+                  ),
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: kIsWeb ? const Color(0xFF0284C7) : Colors.blueGrey.shade700,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                  ),
+                  onPressed: _selecionarMultiplosArquivos,
+                  icon: const Icon(Icons.file_present_rounded),
+                  label: const Text('Selecionar Arquivos .HTML'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBarraTopoSlim() {
+    final todasDatasEscopo = _todasAsDatasDoEscopo();
+    final datasDoDiaSemana = todasDatasEscopo.where((d) => d.weekday == _diaSemanaComparar).map(_fmtDataBR).toSet();
+
+    final chipsParaExibir = <String>{
+      ...datasDoDiaSemana,
+      ..._datasMarcadasComparacao,
+    }.toList()
+      ..sort((a, b) => _parseStrToDate(a).compareTo(_parseStrToDate(b)));
+
+    final labelIntervalo = (_dataInicio != null && _dataFim != null)
+        ? (_dataInicio == _dataFim
+            ? 'Dia: ${_fmtDataBR(_dataInicio!)}'
+            : '${_fmtCurto(_fmtDataBR(_dataInicio!))} a ${_fmtDataBR(_dataFim!)}')
+        : 'Período';
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      child: Wrap(
+        spacing: 10,
+        runSpacing: 10,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          _pillSelect(
+            icone: Icons.calendar_today_rounded,
+            label: 'Mês',
+            value: _mesSelecionado,
+            items: _dataset.mesesDisponiveis.isEmpty ? ['Agosto/2026'] : _dataset.mesesDisponiveis,
+            onChanged: (v) {
+              if (v == null) return;
+              setState(() {
+                _mesSelecionado = v;
+                _periodicidade = _obterPeriodicidadeValida(_dataset, v, _periodicidade);
+                _recalcularLimitesData();
+                _atualizarChipsDiaSemana(_diaSemanaComparar, mudarModo: false);
+              });
+            },
+          ),
+          _pillSelect(
+            icone: Icons.layers_outlined,
+            label: 'Visão',
+            value: _periodicidade,
+            items: const ['Mensal', 'Quinzenal'],
+            onChanged: (v) {
+              if (v == null) return;
+              setState(() {
+                _periodicidade = v;
+                _recalcularLimitesData();
+                _atualizarChipsDiaSemana(_diaSemanaComparar, mudarModo: false);
+              });
+            },
+          ),
+          _pillSelect(
+            icone: Icons.directions_bus_outlined,
+            label: 'Linha',
+            value: _linhaSelecionada ?? 'Todas',
+            items: ['Todas', ..._dataset.linhasDisponiveis],
+            onChanged: (v) => setState(() => _linhaSelecionada = (v == 'Todas') ? null : v),
+          ),
+
+          Container(
+            padding: const EdgeInsets.all(3),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF1F5F9),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _tabModoButton(
+                  titulo: 'Por Período',
+                  icone: Icons.date_range_rounded,
+                  ativo: _modoAtivo == ModoAnalise.extratoPeriodo,
+                  onTap: () => setState(() => _modoAtivo = ModoAnalise.extratoPeriodo),
+                ),
+                _tabModoButton(
+                  titulo: 'Comparar Dias',
+                  icone: Icons.compare_arrows_rounded,
+                  ativo: _modoAtivo == ModoAnalise.compararDiasSemana,
+                  onTap: () => setState(() => _modoAtivo = ModoAnalise.compararDiasSemana),
+                ),
+              ],
+            ),
+          ),
+
+          if (_modoAtivo == ModoAnalise.extratoPeriodo) ...[
+            _pillSelect(
+              icone: Icons.bolt_rounded,
+              label: 'Recorte',
+              value: _presetPeriodo,
+              items: const ['Mês Todo', '1ª Quinzena', '2ª Quinzena', 'Dia Único', 'Personalizado'],
+              onChanged: (val) async {
+                if (val == null) return;
+                final dts = _todasAsDatasDoEscopo();
+                final base = dts.isNotEmpty ? dts.first : DateTime(2026, 8, 1);
+                final fimMes = dts.isNotEmpty ? dts.last : DateTime(2026, 8, 31);
+
+                if (val == 'Mês Todo') {
+                  setState(() {
+                    _presetPeriodo = val;
+                    _dataInicio = base;
+                    _dataFim = fimMes;
+                  });
+                } else if (val == '1ª Quinzena') {
+                  setState(() {
+                    _presetPeriodo = val;
+                    _dataInicio = DateTime(base.year, base.month, 1);
+                    _dataFim = DateTime(base.year, base.month, 15);
+                  });
+                } else if (val == '2ª Quinzena') {
+                  setState(() {
+                    _presetPeriodo = val;
+                    _dataInicio = DateTime(base.year, base.month, 16);
+                    _dataFim = DateTime(base.year, base.month, fimMes.day);
+                  });
+                } else if (val == 'Dia Único') {
+                  await _abrirSingleDatePicker();
+                } else if (val == 'Personalizado') {
+                  await _abrirRangePicker();
+                }
+              },
+            ),
+            OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                side: const BorderSide(color: Color(0xFFCBD5E1)),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+              icon: const Icon(Icons.edit_calendar_rounded, size: 16, color: Color(0xFF0284C7)),
+              label: Text(
+                labelIntervalo,
+                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF0F172A)),
+              ),
+              onPressed: () {
+                if (_presetPeriodo == 'Dia Único') {
+                  _abrirSingleDatePicker();
+                } else {
+                  _abrirRangePicker();
+                }
+              },
+            ),
+          ] else ...[
+            Wrap(
+              spacing: 4,
+              children: _nomesCurtoDia.entries.map((e) {
+                final sel = _diaSemanaComparar == e.key;
+                return InkWell(
+                  onTap: () => _atualizarChipsDiaSemana(e.key),
+                  borderRadius: BorderRadius.circular(6),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: sel ? const Color(0xFF7C3AED) : const Color(0xFFF1F5F9),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      e.value,
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: sel ? Colors.white : const Color(0xFF475569),
+                      ),
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+            ...chipsParaExibir.map((dataStr) {
+              final marcado = _datasMarcadasComparacao.contains(dataStr);
+              final ehExtra = !datasDoDiaSemana.contains(dataStr);
+              return FilterChip(
+                visualDensity: VisualDensity.compact,
+                label: Text(
+                  _fmtCurto(dataStr),
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: ehExtra ? const Color(0xFF0284C7) : null,
+                  ),
+                ),
+                selected: marcado,
+                selectedColor: ehExtra ? const Color(0xFFE0F2FE) : const Color(0xFFDDD6FE),
+                checkmarkColor: ehExtra ? const Color(0xFF0369A1) : const Color(0xFF5B21B6),
+                onSelected: (v) {
+                  setState(() {
+                    if (v) {
+                      _datasMarcadasComparacao.add(dataStr);
+                    } else {
+                      _datasMarcadasComparacao.remove(dataStr);
+                    }
+                  });
+                },
+              );
+            }),
+            ActionChip(
+              visualDensity: VisualDensity.compact,
+              avatar: const Icon(Icons.calendar_month_rounded, size: 14, color: Color(0xFF7C3AED)),
+              label: Text('+ Datas (${_datasMarcadasComparacao.length})', style: const TextStyle(fontSize: 11)),
+              onPressed: _abrirSeletorMultiplasDatas,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Future<void> _abrirSingleDatePicker() async {
+    final todasGlobal = _todasAsDatasGlobal();
+    final minDate = todasGlobal.isNotEmpty ? todasGlobal.first : DateTime(2026, 1, 1);
+    final maxDate = todasGlobal.isNotEmpty ? todasGlobal.last : DateTime(2026, 12, 31);
+    final initial = _dataInicio ?? minDate;
+
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initial.isBefore(minDate) ? minDate : (initial.isAfter(maxDate) ? maxDate : initial),
+      firstDate: DateTime(2026, 1, 1),
+      lastDate: DateTime(2026, 12, 31),
+      helpText: 'SELECIONE O DIA ÚNICO (QUALQUER MÊS)',
+    );
+    if (picked != null) {
+      setState(() {
+        _sincronizarMesPelaData(picked);
+        _presetPeriodo = 'Dia Único';
+        _dataInicio = picked;
+        _dataFim = picked;
+      });
+    }
+  }
+
+  Future<void> _abrirRangePicker() async {
+    final todasGlobal = _todasAsDatasGlobal();
+    final minDate = todasGlobal.isNotEmpty ? todasGlobal.first : DateTime(2026, 1, 1);
+    final maxDate = todasGlobal.isNotEmpty ? todasGlobal.last : DateTime(2026, 12, 31);
+
+    final picked = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(2026, 1, 1),
+      lastDate: DateTime(2026, 12, 31),
+      initialDateRange: DateTimeRange(
+        start: _dataInicio ?? minDate,
+        end: _dataFim ?? maxDate,
+      ),
+      helpText: 'SELECIONE O PERÍODO OU DIA ÚNICO',
+    );
+    if (picked != null) {
+      setState(() {
+        _sincronizarMesPelaData(picked.start);
+        _presetPeriodo = picked.start == picked.end ? 'Dia Único' : 'Personalizado';
+        _dataInicio = picked.start;
+        _dataFim = picked.end;
+      });
+    }
+  }
+
+  Widget _pillSelect({
+    required IconData icone,
+    required String label,
+    required String value,
+    required List<String> items,
+    required ValueChanged<String?> onChanged,
+  }) {
+    final valorSeguro = items.contains(value) ? value : items.first;
+    return Container(
+      height: 34,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFCBD5E1)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icone, size: 14, color: Colors.blueGrey),
+          const SizedBox(width: 5),
+          Text('$label: ', style: const TextStyle(fontSize: 11, color: Colors.blueGrey, fontWeight: FontWeight.w600)),
+          DropdownButtonHideUnderline(
+            child: DropdownButton<String>(
+              value: valorSeguro,
+              isDense: true,
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF0F172A)),
+              items: items.map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
+              onChanged: onChanged,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _tabModoButton({
+    required String titulo,
+    required IconData icone,
+    required bool ativo,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: ativo ? Colors.white : Colors.transparent,
+          borderRadius: BorderRadius.circular(6),
+          boxShadow: ativo ? [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 3)] : null,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icone, size: 14, color: ativo ? const Color(0xFF0284C7) : Colors.blueGrey),
+            const SizedBox(width: 5),
+            Text(
+              titulo,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+                color: ativo ? const Color(0xFF0F172A) : Colors.blueGrey,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _abrirSeletorMultiplasDatas() {
+    final todasDatas = _todasAsDatasDoEscopo().map(_fmtDataBR).toList();
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setModal) {
+            return AlertDialog(
+              title: const Text('Escolher Datas para Comparar', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              content: SizedBox(
+                width: 480,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Marque quaisquer dias do mês para adicioná-los à barra de comparação:',
+                        style: TextStyle(fontSize: 12, color: Colors.grey),
+                      ),
+                      const SizedBox(height: 12),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: todasDatas.map((dtStr) {
+                          final sel = _datasMarcadasComparacao.contains(dtStr);
+                          return FilterChip(
+                            label: Text(dtStr),
+                            selected: sel,
+                            selectedColor: const Color(0xFFDDD6FE),
+                            onSelected: (v) {
+                              setModal(() {
+                                if (v) {
+                                  _datasMarcadasComparacao.add(dtStr);
+                                } else {
+                                  _datasMarcadasComparacao.remove(dtStr);
+                                }
+                              });
+                              setState(() {});
+                            },
+                          );
+                        }).toList(),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    setModal(() => _datasMarcadasComparacao.clear());
+                    setState(() {});
+                  },
+                  child: const Text('Desmarcar Tudo', style: TextStyle(color: Colors.red)),
+                ),
+                ElevatedButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Concluído'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildKPIsResponsivo(
+    bool isWide,
+    List<ResumoDiario> resumos,
+    List<PassageiroDiario> passageiros,
+    List<FaixaHorariaItem> fxHr,
+    List<LinhaDiaria> linhas,
+  ) {
+    int prog = 0;
+    int realiz = 0;
+    double kmTotal = 0;
+    double kmImprod = 0;
+    int maxFrota = 0;
+
+    if (_linhaSelecionada == null && resumos.isNotEmpty) {
+      for (final r in resumos) {
+        prog += r.viagensProg;
+        realiz += r.viagensRealiz;
+        kmTotal += r.kmTotal;
+        kmImprod += r.kmImprod;
+        if (r.veiculos > maxFrota) maxFrota = r.veiculos;
+      }
+    } else if (linhas.isNotEmpty) {
+      for (final l in linhas) {
+        prog += l.viagensProg;
+        realiz += l.viagensRealiz;
+        kmTotal += l.kmTotal;
+      }
+    } else {
+      for (final f in fxHr) {
+        realiz += f.viagens;
+        prog += f.viagens;
+        if (f.veiculos > maxFrota) maxFrota = f.veiculos;
+      }
+    }
+
+    int totalPass = 0;
+    int totalCatraca = 0;
+    int totalGratuitos = 0;
+    for (final p in passageiros) {
+      totalPass += p.totalPassageiros;
+      totalCatraca += p.catraca;
+      totalGratuitos += p.naoPagantes;
+    }
+
+    final fcvPercent = prog > 0 ? (realiz / prog) * 100 : 100.0;
+    final ipk = kmTotal > 0 ? totalPass / kmTotal : 0.0;
+    final percGratuidade = totalPass > 0 ? (totalGratuitos / totalPass) * 100 : 0.0;
+
+    final cards = [
+      _cardKpi(
+        titulo: 'VIAGENS REALIZADAS',
+        valor: _fmtInt(realiz),
+        subtitulo: 'Prog: ${_fmtInt(prog)} (${realiz - prog >= 0 ? "+${realiz - prog}" : "${realiz - prog}"})',
+        cor: const Color(0xFF0284C7),
+        icone: Icons.route_rounded,
+      ),
+      _cardKpi(
+        titulo: 'CUMPRIMENTO (FCV)',
+        valor: '${fcvPercent.toStringAsFixed(2)}%',
+        subtitulo: fcvPercent >= 98 ? '✓ Meta Atingida' : 'Abaixo de 98%',
+        cor: fcvPercent >= 98 ? const Color(0xFF059669) : const Color(0xFFD97706),
+        icone: Icons.verified_rounded,
+      ),
+      _cardKpi(
+        titulo: 'QUILOMETRAGEM TOTAL',
+        valor: '${_fmtMilhar(kmTotal)} km',
+        subtitulo: 'Improd: ${kmImprod.toStringAsFixed(0)} km',
+        cor: const Color(0xFF7C3AED),
+        icone: Icons.speed_rounded,
+      ),
+      _cardKpi(
+        titulo: 'TOTAL PASSAGEIROS',
+        valor: _fmtInt(totalPass),
+        subtitulo: 'Catraca: ${_fmtInt(totalCatraca)}',
+        cor: const Color(0xFFEA580C),
+        icone: Icons.groups_rounded,
+      ),
+      _cardKpi(
+        titulo: 'TAXA DE GRATUIDADE',
+        valor: '${percGratuidade.toStringAsFixed(1)}%',
+        subtitulo: 'Gratuitos: ${_fmtInt(totalGratuitos)}',
+        cor: const Color(0xFFE11D48),
+        icone: Icons.volunteer_activism_rounded,
+      ),
+      _cardKpi(
+        titulo: 'FROTA PICO / IPK',
+        valor: '$maxFrota ônibus',
+        subtitulo: 'IPK: ${ipk.toStringAsFixed(2)} pass/km',
+        cor: const Color(0xFF0F172A),
+        icone: Icons.directions_bus_rounded,
+      ),
+    ];
+
+    if (isWide) {
+      return Row(
+        children: [
+          for (int i = 0; i < cards.length; i++) ...[
+            Expanded(child: cards[i]),
+            if (i < cards.length - 1) const SizedBox(width: 12),
+          ]
+        ],
+      );
+    }
+
+    return Column(
+      children: [
+        Row(children: [Expanded(child: cards[0]), const SizedBox(width: 10), Expanded(child: cards[1])]),
+        const SizedBox(height: 10),
+        Row(children: [Expanded(child: cards[2]), const SizedBox(width: 10), Expanded(child: cards[3])]),
+        const SizedBox(height: 10),
+        Row(children: [Expanded(child: cards[4]), const SizedBox(width: 10), Expanded(child: cards[5])]),
+      ],
+    );
+  }
+
+  Widget _cardKpi({
+    required String titulo,
+    required String valor,
+    required String subtitulo,
+    required Color cor,
+    required IconData icone,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(10),
+        border: Border(left: BorderSide(color: cor, width: 4)),
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 4)],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(
+                child: Text(
+                  titulo,
+                  style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Colors.blueGrey),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              Icon(icone, size: 15, color: cor),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(valor, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: cor)),
+          const SizedBox(height: 4),
+          Text(subtitulo, style: const TextStyle(fontSize: 11, color: Colors.grey), overflow: TextOverflow.ellipsis),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGraficoViagensEQuilometragem(
+    List<ResumoDiario> resumos,
+    List<FaixaHorariaItem> fxHr,
+    List<LinhaDiaria> linhas,
+  ) {
+    final Map<String, double> mapProg = {};
+    final Map<String, double> mapReal = {};
+
+    if (_linhaSelecionada == null && resumos.isNotEmpty) {
+      for (final r in resumos) {
+        mapProg[r.data] = r.viagensProg.toDouble();
+        mapReal[r.data] = r.viagensRealiz.toDouble();
+      }
+    } else if (linhas.isNotEmpty) {
+      for (final l in linhas) {
+        mapProg[l.data] = (mapProg[l.data] ?? 0) + l.viagensProg;
+        mapReal[l.data] = (mapReal[l.data] ?? 0) + l.viagensRealiz;
+      }
+    } else {
+      for (final f in fxHr) {
+        mapReal[f.data] = (mapReal[f.data] ?? 0) + f.viagens;
+        mapProg[f.data] = mapReal[f.data]!;
+      }
+    }
+
+    final datas = mapReal.keys.toList();
+
+    return _boxGrafico(
+      titulo: _linhaSelecionada == null
+          ? 'Execução Diária de Viagens (Prog. vs. Realiz.)'
+          : 'Viagens Diárias Realizadas • Linha $_linhaSelecionada',
+      subtitulo: 'Comparativo direto dos dias selecionados',
+      legenda: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _bolinhaLegenda(const Color(0xFFCBD5E1), 'Prog.'),
+          const SizedBox(width: 8),
+          _bolinhaLegenda(const Color(0xFF0284C7), 'Realiz.'),
+        ],
+      ),
+      child: datas.isEmpty
+          ? const Center(child: Text('Sem dados para os dias selecionados.'))
+          : _barChartDuplo(
+              labels: datas.map(_fmtCurto).toList(),
+              valoresA: datas.map((d) => mapProg[d] ?? 0).toList(),
+              valoresB: datas.map((d) => mapReal[d] ?? 0).toList(),
+              corA: const Color(0xFFCBD5E1),
+              corB: const Color(0xFF0284C7),
+            ),
+    );
+  }
+
+  Widget _buildGraficoPassageiros(List<PassageiroDiario> passageiros) {
+    final labels = passageiros.map((e) => _fmtCurto(e.data)).toList();
+    final pagantes = passageiros.map((e) => (e.catraca + e.antecipados).toDouble()).toList();
+    final gratuitos = passageiros.map((e) => e.naoPagantes.toDouble()).toList();
+
+    return _boxGrafico(
+      titulo: 'Passageiros por Dia (Pagantes vs. Gratuidade)',
+      subtitulo: 'Evolução diária do sistema de bilhetagem',
+      legenda: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _bolinhaLegenda(const Color(0xFF0284C7), 'Pagantes'),
+          const SizedBox(width: 8),
+          _bolinhaLegenda(const Color(0xFFF97316), 'Gratuidade'),
+        ],
+      ),
+      child: passageiros.isEmpty
+          ? const Center(child: Text('Sem dados de passageiros para este filtro.'))
+          : _barChartDuplo(
+              labels: labels,
+              valoresA: pagantes,
+              valoresB: gratuitos,
+              corA: const Color(0xFF0284C7),
+              corB: const Color(0xFFF97316),
+            ),
+    );
+  }
+
+  Widget _buildGraficoFaixaHoraria(List<FaixaHorariaItem> fxHr) {
+    final Map<int, double> viagensPorHora = {};
+    for (final item in fxHr) {
+      viagensPorHora[item.hora] = (viagensPorHora[item.hora] ?? 0) + item.viagens;
+    }
+
+    final horas = viagensPorHora.keys.toList()..sort();
+    final maxVal = viagensPorHora.values.isEmpty ? 10.0 : viagensPorHora.values.reduce((a, b) => a > b ? a : b);
+    final interval = _calcularIntervalo(maxVal);
+    final maxY = (((maxVal * 1.2) / interval).ceil() * interval).toDouble();
+
+    return _boxGrafico(
+      titulo: 'Viagens por Faixa Horária (0h às 23h)',
+      subtitulo: _linhaSelecionada == null ? 'Soma de todas as linhas' : 'Operação da Linha $_linhaSelecionada',
+      legenda: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _bolinhaLegenda(const Color(0xFFE11D48), 'Pico'),
+          const SizedBox(width: 8),
+          _bolinhaLegenda(const Color(0xFF475569), 'Normal'),
+        ],
+      ),
+      child: horas.isEmpty
+          ? const Center(child: Text('Sem dados de faixa horária.'))
+          : BarChart(
+              BarChartData(
+                maxY: maxY,
+                borderData: FlBorderData(show: false),
+                gridData: const FlGridData(drawVerticalLine: false),
+                barTouchData: _tooltipPadrao(),
+                barGroups: horas.map((h) {
+                  final pico = (h >= 6 && h <= 8) || (h >= 17 && h <= 19);
+                  return BarChartGroupData(
+                    x: h,
+                    barRods: [
+                      BarChartRodData(
+                        toY: viagensPorHora[h]!,
+                        color: pico ? const Color(0xFFE11D48) : const Color(0xFF475569),
+                        width: 12,
+                        borderRadius: BorderRadius.circular(3),
+                      ),
+                    ],
+                  );
+                }).toList(),
+                titlesData: FlTitlesData(
+                  rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  leftTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      interval: interval,
+                      reservedSize: 44,
+                      getTitlesWidget: (v, m) => Text(_fmtMilhar(v), style: const TextStyle(fontSize: 10, color: Colors.blueGrey)),
+                    ),
+                  ),
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 26,
+                      getTitlesWidget: (v, m) {
+                        final h = v.toInt();
+                        if (h % 2 != 0 && horas.length > 12) return const SizedBox.shrink();
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text('${h}h', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600)),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+    );
+  }
+
+  Widget _buildGraficoTurnosERanking(List<FcvDiario> fcv, List<FaixaHorariaItem> fxHr) {
+    int manhaP = 0, manhaR = 0, tardeP = 0, tardeR = 0, noiteP = 0, noiteR = 0;
+    for (final item in fcv) {
+      manhaP += item.manhaProg;
+      manhaR += item.manhaRealiz;
+      tardeP += item.tardeProg;
+      tardeR += item.tardeRealiz;
+      noiteP += item.noiteProg;
+      noiteR += item.noiteRealiz;
+    }
+
+    final Map<String, int> viagensPorLinha = {};
+    for (final f in fxHr) {
+      viagensPorLinha[f.linha] = (viagensPorLinha[f.linha] ?? 0) + f.viagens;
+    }
+    final topLinhas = viagensPorLinha.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+
+    return _boxGrafico(
+      titulo: 'Turnos (FCV) & Linhas Mais Ativas',
+      subtitulo: 'Cumprimento Manhã/Tarde/Noite + Top Linhas',
+      child: Row(
+        children: [
+          Expanded(
+            flex: 5,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                _barraProgressoTurno('Manhã', manhaR, manhaP, const Color(0xFFF59E0B)),
+                const SizedBox(height: 14),
+                _barraProgressoTurno('Tarde', tardeR, tardeP, const Color(0xFFEA580C)),
+                const SizedBox(height: 14),
+                _barraProgressoTurno('Noite', noiteR, noiteP, const Color(0xFF312E81)),
+              ],
+            ),
+          ),
+          const VerticalDivider(width: 24),
+          Expanded(
+            flex: 5,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Top Linhas (Partidas)', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.blueGrey)),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: topLinhas.isEmpty
+                      ? const Center(child: Text('Sem dados'))
+                      : ListView.builder(
+                          itemCount: topLinhas.take(5).length,
+                          itemBuilder: (ctx, i) {
+                            final item = topLinhas[i];
+                            final maxLinha = topLinhas.first.value;
+                            final ratio = maxLinha > 0 ? item.value / maxLinha : 0.0;
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 8.0),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Text('Linha ${item.key}', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                                      Text('${item.value} viag.', style: const TextStyle(fontSize: 10, color: Colors.blueGrey)),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 3),
+                                  ClipRRect(
+                                    borderRadius: BorderRadius.circular(4),
+                                    child: LinearProgressIndicator(
+                                      value: ratio,
+                                      minHeight: 6,
+                                      backgroundColor: const Color(0xFFE2E8F0),
+                                      color: const Color(0xFF0284C7),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _barraProgressoTurno(String turno, int realiz, int prog, Color cor) {
+    final perc = prog > 0 ? (realiz / prog) * 100 : 0.0;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(turno, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+            Text('${perc.toStringAsFixed(1)}%', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: cor)),
+          ],
+        ),
+        const SizedBox(height: 4),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(6),
+          child: LinearProgressIndicator(
+            value: (perc / 100).clamp(0.0, 1.0),
+            minHeight: 10,
+            backgroundColor: const Color(0xFFE2E8F0),
+            color: cor,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _barChartDuplo({
+    required List<String> labels,
+    required List<double> valoresA,
+    required List<double> valoresB,
+    required Color corA,
+    required Color corB,
+  }) {
+    double maxVal = 10;
+    for (final v in [...valoresA, ...valoresB]) {
+      if (v > maxVal) maxVal = v;
+    }
+    final interval = _calcularIntervalo(maxVal);
+    final maxY = (((maxVal * 1.22) / interval).ceil() * interval).toDouble();
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final larguraMin = constraints.maxWidth;
+        final larguraCalculada = (labels.length * 52.0).clamp(larguraMin, 3000.0);
+
+        return SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: SizedBox(
+            width: larguraCalculada,
+            child: BarChart(
+              BarChartData(
+                maxY: maxY,
+                borderData: FlBorderData(show: false),
+                gridData: const FlGridData(drawVerticalLine: false),
+                barTouchData: _tooltipPadrao(),
+                barGroups: List.generate(labels.length, (i) {
+                  return BarChartGroupData(
+                    x: i,
+                    barsSpace: 4,
+                    barRods: [
+                      BarChartRodData(
+                        toY: valoresA[i],
+                        color: corA,
+                        width: labels.length <= 7 ? 16 : 10,
+                        borderRadius: BorderRadius.circular(3),
+                      ),
+                      BarChartRodData(
+                        toY: valoresB[i],
+                        color: corB,
+                        width: labels.length <= 7 ? 16 : 10,
+                        borderRadius: BorderRadius.circular(3),
+                      ),
+                    ],
+                  );
+                }),
+                titlesData: FlTitlesData(
+                  rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  leftTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      interval: interval,
+                      reservedSize: 44,
+                      getTitlesWidget: (v, m) => Text(_fmtMilhar(v), style: const TextStyle(fontSize: 10, color: Colors.blueGrey)),
+                    ),
+                  ),
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 26,
+                      getTitlesWidget: (v, m) {
+                        final idx = v.toInt();
+                        if (idx < 0 || idx >= labels.length) return const SizedBox.shrink();
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text(labels[idx], style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600)),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  BarTouchData _tooltipPadrao() {
+    return BarTouchData(
+      touchTooltipData: BarTouchTooltipData(
+        fitInsideHorizontally: true,
+        fitInsideVertically: true,
+        getTooltipColor: (_) => const Color(0xFF0F172A),
+        tooltipPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        getTooltipItem: (group, groupIndex, rod, rodIndex) {
+          return BarTooltipItem(
+            _fmtInt(rod.toY.round()),
+            const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _boxGrafico({
+    required String titulo,
+    required String subtitulo,
+    Widget? legenda,
+    required Widget child,
+  }) {
+    return Container(
+      height: 300,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(titulo, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: Color(0xFF0F172A))),
+                    const SizedBox(height: 2),
+                    Text(subtitulo, style: const TextStyle(fontSize: 11, color: Colors.blueGrey)),
+                  ],
+                ),
+              ),
+              if (legenda != null) legenda,
+            ],
+          ),
+          const SizedBox(height: 14),
+          Expanded(child: child),
+        ],
+      ),
+    );
+  }
+
+  Widget _bolinhaLegenda(Color cor, String texto) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(width: 10, height: 10, decoration: BoxDecoration(color: cor, borderRadius: BorderRadius.circular(3))),
+        const SizedBox(width: 4),
+        Text(texto, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: Colors.blueGrey)),
+      ],
+    );
+  }
+
+  Widget _buildTabelaResumo(List<ResumoDiario> resumos, List<PassageiroDiario> passageiros) {
+    final mapPass = {for (var p in passageiros) p.data: p};
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Espelho Diário Consolidado (Operação + Bilhetagem)',
+            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: Color(0xFF0F172A)),
+          ),
+          const SizedBox(height: 10),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: DataTable(
+              headingRowColor: WidgetStateProperty.all(const Color(0xFFF8FAFC)),
+              columns: const [
+                DataColumn(label: Text('Data', style: TextStyle(fontWeight: FontWeight.bold))),
+                DataColumn(label: Text('Dia da Semana', style: TextStyle(fontWeight: FontWeight.bold))),
+                DataColumn(label: Text('Frota', style: TextStyle(fontWeight: FontWeight.bold))),
+                DataColumn(label: Text('Viagens Prog.', style: TextStyle(fontWeight: FontWeight.bold))),
+                DataColumn(label: Text('Viagens Realiz.', style: TextStyle(fontWeight: FontWeight.bold))),
+                DataColumn(label: Text('Dif.', style: TextStyle(fontWeight: FontWeight.bold))),
+                DataColumn(label: Text('KM Total', style: TextStyle(fontWeight: FontWeight.bold))),
+                DataColumn(label: Text('Catraca', style: TextStyle(fontWeight: FontWeight.bold))),
+                DataColumn(label: Text('Gratuitos', style: TextStyle(fontWeight: FontWeight.bold))),
+                DataColumn(label: Text('Total Passageiros', style: TextStyle(fontWeight: FontWeight.bold))),
+              ],
+              rows: resumos.map((r) {
+                final p = mapPass[r.data];
+                return DataRow(
+                  cells: [
+                    DataCell(Text(r.data, style: const TextStyle(fontWeight: FontWeight.w600))),
+                    DataCell(Text(_nomesLongoDia[r.weekday] ?? '')),
+                    DataCell(Text('${r.veiculos} veíc.')),
+                    DataCell(Text(_fmtInt(r.viagensProg))),
+                    DataCell(Text(_fmtInt(r.viagensRealiz))),
+                    DataCell(Text(
+                      r.difViagens == 0 ? '0' : '-${r.difViagens}',
+                      style: TextStyle(
+                        color: r.difViagens == 0 ? Colors.green.shade700 : Colors.red.shade700,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    )),
+                    DataCell(Text('${r.kmTotal.toStringAsFixed(1)} km')),
+                    DataCell(Text(p != null ? _fmtInt(p.catraca) : '-')),
+                    DataCell(Text(p != null ? _fmtInt(p.naoPagantes) : '-')),
+                    DataCell(Text(
+                      p != null ? _fmtInt(p.totalPassageiros) : '-',
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    )),
+                  ],
+                );
+              }).toList(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static double _calcularIntervalo(double max) {
+    if (max <= 10) return 2;
+    if (max <= 50) return 10;
+    if (max <= 200) return 50;
+    if (max <= 500) return 100;
+    if (max <= 1500) return 300;
+    if (max <= 5000) return 1000;
+    if (max <= 25000) return 5000;
+    if (max <= 60000) return 10000;
+    return (max / 4).ceilToDouble();
+  }
+
+  static String _fmtMilhar(double v) {
+    if (v >= 1000) return '${(v / 1000).toStringAsFixed(1)}k';
+    return v.toInt().toString();
+  }
+
+  static String _fmtInt(int v) {
+    final s = v.toString();
+    final buffer = StringBuffer();
+    for (int i = 0; i < s.length; i++) {
+      if (i > 0 && (s.length - i) % 3 == 0) buffer.write('.');
+      buffer.write(s[i]);
+    }
+    return buffer.toString();
+  }
+}
