@@ -92,21 +92,15 @@ def _extrair_hora(valor: Any) -> Optional[int]:
     m = re.search(r"\d{1,2}", _to_str(valor))
     return int(m.group()) if m else None
 
-
-def _parse_partidas(valor: Any) -> List[Any]:
+def _parse_partidas(valor: Any) -> List[int]:
+    #Minutos de partida dentro da faixa horária. Origem real: "34 > 57 > 59" (separador ">").
     if _vazio(valor):
         return []
     if isinstance(valor, (int, float)):
         inteiro = _to_int(valor, None)
         return [] if inteiro is None else [inteiro]
-    itens = valor if isinstance(valor, (list, tuple)) else re.split(r"[;,|\s]+", str(valor).strip())
-    resultado: List[Any] = []
-    for item in itens:
-        texto = str(item).strip()
-        if not texto:
-            continue
-        resultado.append(int(texto) if texto.isdigit() else texto)
-    return resultado
+    itens = valor if isinstance(valor, (list, tuple)) else re.split(r"[>;,|\s]+", str(valor).strip())
+    return [int(t) for t in (str(i).strip() for i in itens) if t.isdigit()]
 
 def mapear_viagens_sistema(
     dados_mensal: List[Dict[str, Any]],
@@ -124,10 +118,8 @@ def mapear_viagens_sistema(
         dt = _resolver_data(item)
         if not dt:
             continue
-
         combinado = {**item, **_sem_none(fcv_map.get(dt, {}))}
         doc: Dict[str, Any] = {"data": dt}
-        
         doc.update(_sem_none({
             "diaSem": _to_str(combinado.get("dia_semana"), None),
             "nrVeiculos": _to_int(combinado.get("numero_veiculos"), None),
@@ -226,7 +218,7 @@ def mapear_viagens_ocorrencias(
     return documentos
 
 def mapear_passageiros_sistema(dados_passageiros: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Passageiros_Mensal.html -> passegeirosSistema."""
+    #Passageiros_Mensal.html -> passegeirosSistema.
     documentos = []
     for item in dados_passageiros:
         dt = _resolver_data(item)
