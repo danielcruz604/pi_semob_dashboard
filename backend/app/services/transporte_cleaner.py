@@ -15,6 +15,9 @@ COLUNAS_DATA_HORA = {
     "inicio_programado", "inicio_realizado", "fim_programado", "fim_realizado",
 }
 
+_RE_TEM_DATA = re.compile(r"\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}")
+_RE_INICIA_COM_ANO = re.compile(r"^\d{4}[-/.]")
+
 MARCADORES_AGREGADOS = re.compile(
     r"^(?:total(?:\s|_|$)|subtotal(?:\s|_|$)|resumo(?:\s|_|$)|fonte:|emissao:|pagina:)"
 )
@@ -54,13 +57,28 @@ def _remover_totais(df: pd.DataFrame) -> pd.DataFrame:
         mascara |= texto.str.match(MARCADORES_AGREGADOS, na=False)
     return df.loc[~mascara].copy()
 
+def _converter_datas(serie: pd.Series) -> pd.Series:
+    #Datas que iniciam pelo ano são lidas literalmente, as demais assumem dia primeiro.
+    indice = serie.index
+    texto = serie.astype("string").str.strip().reset_index(drop=True)
+    valido = texto.str.contains(_RE_TEM_DATA, na=False)
+    iso = valido & texto.str.match(_RE_INICIA_COM_ANO, na=False)
+    brasileiro = valido & ~iso
+    partes = []
+    if iso.any():
+        partes.append(pd.to_datetime(texto[iso].str.replace("T", " ", regex=False), errors="coerce"))
+    if brasileiro.any():
+        partes.append(pd.to_datetime(texto[brasileiro], errors="coerce", dayfirst=True))
+    if not partes:
+        resultado = pd.Series(pd.NaT, index=texto.index, dtype="datetime64[ns]")
+    else:
+        resultado = pd.concat(partes).reindex(texto.index)
+    resultado.index = indice
+    return resultado
+
 def _normalizar_datas(df: pd.DataFrame) -> pd.DataFrame:
     if "data" in df.columns:
-        datas = pd.to_datetime(
-            df["data"].astype("string"),
-            errors="coerce",
-            dayfirst=True,
-        )
+        datas = _converter_datas(df["data"])
         df = df.loc[datas.notna()].copy()
         datas = datas.loc[datas.notna()]
         df["data"] = datas.dt.strftime("%Y-%m-%d")
@@ -84,7 +102,7 @@ def _normalizar_datas(df: pd.DataFrame) -> pd.DataFrame:
 
 def _normalizar_data_hora(serie: pd.Series) -> pd.Series:
     original = serie.astype("string").str.strip()
-    datas = pd.to_datetime(original, errors="coerce")
+    datas = _converter_datas(original)
     resultado = datas.dt.strftime("%Y-%m-%dT%H:%M:%S").astype("string")
     resultado = resultado.mask(original.isna() | (original == ""), pd.NA)
     return resultado
