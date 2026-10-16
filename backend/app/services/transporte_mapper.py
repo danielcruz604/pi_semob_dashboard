@@ -2,15 +2,21 @@ import math
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+import pandas as pd
 
 _PERIODOS = ("manha", "tarde", "noite")
 
 def _vazio(valor: Any) -> bool:
     if valor is None:
         return True
-    if isinstance(valor, float) and math.isnan(valor):
-        return True
-    return isinstance(valor, str) and not valor.strip()
+    if isinstance(valor, str):
+        return not valor.strip()
+    if isinstance(valor, (list, tuple, set, dict)):
+        return False
+    try:
+        return bool(pd.isna(valor))  #float('nan'), np.nan, pd.NA, pd.NaT
+    except (TypeError, ValueError):
+        return False
 
 def _to_str(valor: Any, default: Optional[str] = "") -> Optional[str]:
     #Texto limpo; None/NaN/vazio retornam `default` (nunca a string 'None').
@@ -37,6 +43,10 @@ def _to_float(valor: Any) -> Optional[float]:
 def _sem_none(d: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in d.items() if v is not None}
 
+def _sem_vazios(d: Dict[str, Any]) -> Dict[str, Any]:
+    #Remove None, NaN, pd.NA e textos vazios (mantém 0 e False).
+    return {k: v for k, v in d.items() if not _vazio(v)}
+
 def _parse_data(valor: Any) -> Optional[datetime]:
     #Converte 'YYYY-MM-DD' (ou ISO com hora) em datetime à meia-noite.
     if _vazio(valor):
@@ -48,7 +58,6 @@ def _parse_data(valor: Any) -> Optional[datetime]:
         return datetime.strptime(texto, "%Y-%m-%d")
     except ValueError:
         return None
-
 
 def _parse_data_hora(valor: Any) -> Optional[datetime]:
     #Converte string ISO 8601 em datetime.
@@ -118,7 +127,8 @@ def mapear_viagens_sistema(
         dt = _resolver_data(item)
         if not dt:
             continue
-        combinado = {**item, **_sem_none(fcv_map.get(dt, {}))}
+        combinado = {**item, **_sem_vazios(fcv_map.get(dt, {}))}
+
         doc: Dict[str, Any] = {"data": dt}
         doc.update(_sem_none({
             "diaSem": _to_str(combinado.get("dia_semana"), None),
@@ -195,12 +205,15 @@ def mapear_viagens_ocorrencias(
     documentos = []
     for item in dados_ocorrencias:
         dt = _resolver_data(item)
-        if not dt:
+        linha = _to_str(item.get("linha"), None)
+        inicio_programado = _parse_data_hora(item.get("inicio_programado"))
+        #data, linha e inicioProgramado compõem a chave do upsert: sem eles o registro é descartado.
+        if not dt or not linha or inicio_programado is None:
             continue
         documentos.append({
             "data": dt,
             "classificacao": _to_str(item.get("classificacao"), None) or classificacao_padrao,
-            "linha": _to_str(item.get("linha")),
+            "linha": linha,
             "atendimento": _to_str(item.get("atendimento")),
             "prefixo": _to_int(item.get("prefixo"), None),
             "atividade": _to_str(item.get("atividade")),
@@ -209,7 +222,7 @@ def mapear_viagens_ocorrencias(
             "tabela": _to_str(item.get("tabela")),
             "statusSaida": _to_str(item.get("status_saida")),
             "statusChegada": _to_str(item.get("status_chegada")),
-            "inicioProgramado": _parse_data_hora(item.get("inicio_programado")),
+            "inicioProgramado": inicio_programado,
             "inicioRealizado": _parse_data_hora(item.get("inicio_realizado")),
             "fimProgramado": _parse_data_hora(item.get("fim_programado")),
             "fimRealizado": _parse_data_hora(item.get("fim_realizado")),
@@ -218,7 +231,7 @@ def mapear_viagens_ocorrencias(
     return documentos
 
 def mapear_passageiros_sistema(dados_passageiros: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    #Passageiros_Mensal.html -> passegeirosSistema.
+    """Passageiros_Mensal.html -> passegeirosSistema."""
     documentos = []
     for item in dados_passageiros:
         dt = _resolver_data(item)
