@@ -11,8 +11,12 @@ class ConnectionFactory:
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(ConnectionFactory, cls).__new__(cls)
-            client = MongoClient(os.getenv("MONGO_URI"))
-            cls._instance._db = client[os.getenv("DATABASE_NAME")]
+
+            uri = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
+            db_name = os.getenv("DATABASE_NAME", "semob_db")
+
+            client = MongoClient(uri)
+            cls._instance._db = client[db_name]
         return cls._instance
 
     @property
