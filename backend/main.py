@@ -36,3 +36,6 @@ app.include_router(dashboard_router, prefix="/api")
 
 app.include_router(usuario_routes.router, prefix="/api")
 
+@app.get("/")
+def status_check():
+    return {"status": "Servidor rodando", "projeto": "semob_dashboard"}
