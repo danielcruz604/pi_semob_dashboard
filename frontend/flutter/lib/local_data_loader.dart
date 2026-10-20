@@ -1,0 +1,533 @@
+import 'dart:convert';
+import 'package:flutter/foundation.dart';
+import 'package:html/parser.dart' as html_parser;
+import 'folder_scanner_io.dart' if (dart.library.html) 'folder_scanner_web.dart';
+
+class SemobDataset {
+  final List<ResumoDiario> resumos = [];
+  final List<PassageiroDiario> passageiros = [];
+  final List<FcvDiario> fcv = [];
+  final List<FaixaHorariaItem> faixasHorarias = [];
+  final List<LinhaDiaria> linhas = [];
+
+  static const Map<String, int> _ordemMeses = {
+    'janeiro': 1,
+    'fevereiro': 2,
+    'março': 3,
+    'marco': 3,
+    'abril': 4,
+    'maio': 5,
+    'junho': 6,
+    'julho': 7,
+    'agosto': 8,
+    'setembro': 9,
+    'outubro': 10,
+    'novembro': 11,
+    'dezembro': 12,
+  };
+
+  bool get isEmpty =>
+      resumos.isEmpty &&
+      passageiros.isEmpty &&
+      fcv.isEmpty &&
+      faixasHorarias.isEmpty &&
+      linhas.isEmpty;
+
+  static int _chaveOrdenacaoMes(String mesAno) {
+    final partes = mesAno.toLowerCase().split('/');
+    if (partes.length != 2) return 999999;
+    final mesNum = _ordemMeses[partes[0].trim()] ?? 99;
+    final anoNum = int.tryParse(partes[1].trim()) ?? 9999;
+    return (anoNum * 100) + mesNum;
+  }
+
+  List<String> get mesesDisponiveis {
+    final s = <String>{
+      ...resumos.map((e) => e.mesAno),
+      ...passageiros.map((e) => e.mesAno),
+      ...faixasHorarias.map((e) => e.mesAno),
+      ...linhas.map((e) => e.mesAno),
+    };
+    final lista = s.toList()
+      ..sort((a, b) => _chaveOrdenacaoMes(a).compareTo(_chaveOrdenacaoMes(b)));
+    return lista;
+  }
+
+  List<String> get linhasDisponiveis {
+    final s = <String>{
+      ...faixasHorarias.map((e) => e.linha),
+      ...linhas.map((e) => e.linha),
+    };
+    final lista = s.toList()..sort();
+    return lista;
+  }
+}
+
+class ResumoDiario {
+  final String mesAno;
+  final String periodicidade;
+  final String data;
+  final DateTime dateTime;
+  final int weekday;
+  final int veiculos;
+  final int maxVeicFaixa;
+  final int viagensProg;
+  final int viagensRealiz;
+  final int difViagens;
+  final double kmProd;
+  final double kmImprod;
+  final double kmTotal;
+
+  ResumoDiario({
+    required this.mesAno,
+    required this.periodicidade,
+    required this.data,
+    required this.dateTime,
+    required this.weekday,
+    required this.veiculos,
+    required this.maxVeicFaixa,
+    required this.viagensProg,
+    required this.viagensRealiz,
+    required this.difViagens,
+    required this.kmProd,
+    required this.kmImprod,
+    required this.kmTotal,
+  });
+}
+
+class PassageiroDiario {
+  final String mesAno;
+  final String periodicidade;
+  final String data;
+  final DateTime dateTime;
+  final int weekday;
+  final int catraca;
+  final int antecipados;
+  final int naoPagantes;
+  final int totalPassageiros;
+
+  PassageiroDiario({
+    required this.mesAno,
+    required this.periodicidade,
+    required this.data,
+    required this.dateTime,
+    required this.weekday,
+    required this.catraca,
+    required this.antecipados,
+    required this.naoPagantes,
+    required this.totalPassageiros,
+  });
+}
+
+class FcvDiario {
+  final String mesAno;
+  final String periodicidade;
+  final String data;
+  final DateTime dateTime;
+  final int weekday;
+  final int manhaProg;
+  final int manhaRealiz;
+  final int tardeProg;
+  final int tardeRealiz;
+  final int noiteProg;
+  final int noiteRealiz;
+  final int totalProg;
+  final int totalRealiz;
+
+  FcvDiario({
+    required this.mesAno,
+    required this.periodicidade,
+    required this.data,
+    required this.dateTime,
+    required this.weekday,
+    required this.manhaProg,
+    required this.manhaRealiz,
+    required this.tardeProg,
+    required this.tardeRealiz,
+    required this.noiteProg,
+    required this.noiteRealiz,
+    required this.totalProg,
+    required this.totalRealiz,
+  });
+}
+
+class FaixaHorariaItem {
+  final String mesAno;
+  final String periodicidade;
+  final String data;
+  final DateTime dateTime;
+  final int weekday;
+  final String linha;
+  final int hora;
+  final String faixaTexto;
+  final int veiculos;
+  final int viagens;
+  final String partidas;
+
+  FaixaHorariaItem({
+    required this.mesAno,
+    required this.periodicidade,
+    required this.data,
+    required this.dateTime,
+    required this.weekday,
+    required this.linha,
+    required this.hora,
+    required this.faixaTexto,
+    required this.veiculos,
+    required this.viagens,
+    required this.partidas,
+  });
+}
+
+class LinhaDiaria {
+  final String mesAno;
+  final String periodicidade;
+  final String data;
+  final DateTime dateTime;
+  final int weekday;
+  final String linha;
+  final int viagensProg;
+  final int viagensRealiz;
+  final double kmTotal;
+
+  LinhaDiaria({
+    required this.mesAno,
+    required this.periodicidade,
+    required this.data,
+    required this.dateTime,
+    required this.weekday,
+    required this.linha,
+    required this.viagensProg,
+    required this.viagensRealiz,
+    required this.kmTotal,
+  });
+}
+
+class LocalDataLoader {
+  static bool arquivoEhRelatorioUtil(String nomeArquivo) {
+    final nome = nomeArquivo.toLowerCase().trim();
+    if (!nome.endsWith('.html') && !nome.endsWith('.htm')) return false;
+
+    if (nome.contains('_viagens') ||
+        nome.contains('nrealiz') ||
+        nome.contains('nterm') ||
+        nome.contains('ninic') ||
+        nome.contains('resumo_fxhr') ||
+        nome.contains('saldos')) {
+      return false;
+    }
+
+    if (nome.contains('passageiro') ||
+        nome.contains('fcv') ||
+        nome.contains('fxhr') ||
+        nome.contains('fx_hr') ||
+        nome.contains('linhas')) {
+      return true;
+    }
+
+    if (RegExp(r'(mensal|quinzenal)[_\s-]*\d{6}').hasMatch(nome)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  static String extrairNomeCurtoPasta(String rawPath) {
+    String limpo = rawPath;
+    try {
+      limpo = Uri.decodeFull(rawPath);
+    } catch (_) {}
+    if (limpo.contains(':')) {
+      final aposDoisPontos = limpo.split(':').last;
+      if (aposDoisPontos.isNotEmpty) limpo = aposDoisPontos;
+    }
+    final partes = limpo.split(RegExp(r'[/\\]')).where((s) => s.isNotEmpty).toList();
+    return partes.isNotEmpty ? partes.last : 'Pasta';
+  }
+
+  static Future<SemobDataset> carregarPasta(String caminhoEscolhido) async {
+    final dataset = SemobDataset();
+    if (kIsWeb) return dataset;
+
+    final arquivosLidos = await escanearPastaNativa(
+      caminhoEscolhido,
+      arquivoEhRelatorioUtil,
+    );
+
+    for (final arq in arquivosLidos) {
+      _processarArquivoIndividual(
+        nomeArquivo: arq.nome,
+        caminhoCompleto: arq.caminho,
+        bytes: arq.bytes,
+        dataset: dataset,
+      );
+    }
+
+    return dataset;
+  }
+
+  static Future<SemobDataset> carregarArquivosSelecionados(List<dynamic> files) async {
+    final dataset = SemobDataset();
+    for (final arquivo in files) {
+      try {
+        final String nome = arquivo.name?.toString() ?? 'relatorio.html';
+        if (!arquivoEhRelatorioUtil(nome)) continue;
+
+        final List<int> bytes = await arquivo.readAsBytes();
+        String caminho = nome;
+        if (!kIsWeb) {
+          try {
+            caminho = arquivo.path?.toString() ?? nome;
+          } catch (_) {}
+        }
+
+        _processarArquivoIndividual(
+          nomeArquivo: nome,
+          caminhoCompleto: caminho,
+          bytes: bytes,
+          dataset: dataset,
+        );
+      } catch (_) {}
+    }
+    return dataset;
+  }
+
+  static void _processarArquivoIndividual({
+    required String nomeArquivo,
+    required String caminhoCompleto,
+    required List<int> bytes,
+    required SemobDataset dataset,
+  }) {
+    final nome = nomeArquivo.toLowerCase();
+
+    String htmlStr;
+    try {
+      htmlStr = utf8.decode(bytes);
+    } catch (_) {
+      htmlStr = latin1.decode(bytes);
+    }
+
+    final caminhoNorm = caminhoCompleto.replaceAll('\\', '/');
+    final periodicidade = (caminhoNorm.toLowerCase().contains('quinzenal') ||
+            nome.contains('quinzenal'))
+        ? 'Quinzenal'
+        : 'Mensal';
+
+    final mesAno = _inferirMesAno(caminhoNorm, nome, htmlStr);
+
+    if (nome.contains('passageiro')) {
+      _parsePassageiros(htmlStr, mesAno, periodicidade, dataset);
+    } else if (nome.contains('fcv')) {
+      _parseFcv(htmlStr, mesAno, periodicidade, dataset);
+    } else if (nome.contains('fxhr') || nome.contains('fx_hr')) {
+      _parseFxHr(htmlStr, mesAno, periodicidade, dataset);
+    } else if (nome.contains('linhas')) {
+      _parseLinhas(htmlStr, mesAno, periodicidade, dataset);
+    } else if (RegExp(r'(mensal|quinzenal)[_\s-]*\d{6}').hasMatch(nome)) {
+      _parseResumoGeral(htmlStr, mesAno, periodicidade, dataset);
+    }
+  }
+
+  static String _inferirMesAno(String path, String filename, String htmlStr) {
+    final lower = '$path/$filename'.toLowerCase();
+    if (lower.contains('julho') || lower.contains('202607')) return 'Julho/2026';
+    if (lower.contains('setembro') || lower.contains('202609')) return 'Setembro/2026';
+    if (lower.contains('agosto') || lower.contains('202608')) return 'Agosto/2026';
+
+    final matchData = RegExp(r'\b\d{2}/(07|08|09)/2026\b').firstMatch(htmlStr);
+    if (matchData != null) {
+      if (matchData.group(1) == '07') return 'Julho/2026';
+      if (matchData.group(1) == '08') return 'Agosto/2026';
+      if (matchData.group(1) == '09') return 'Setembro/2026';
+    }
+    return 'Agosto/2026';
+  }
+
+  static List<List<String>> _extrairLinhasTabelaDados(String htmlContent, int minCols) {
+    final doc = html_parser.parse(htmlContent);
+    final tabelas = doc.querySelectorAll('table.data');
+    final resultado = <List<String>>[];
+
+    for (final tab in tabelas) {
+      final ths = tab.querySelectorAll('th');
+      if (ths.length < minCols) continue;
+
+      for (final tr in tab.querySelectorAll('tr')) {
+        final tds = tr.querySelectorAll('td');
+        if (tds.length < minCols) continue;
+        final valores = tds.map((e) => e.text.trim()).toList();
+        final primeiro = valores[0].toLowerCase();
+        final segundo = valores.length > 1 ? valores[1].toLowerCase() : '';
+        if (primeiro.isEmpty ||
+            primeiro.contains('total') ||
+            primeiro.contains('gerado') ||
+            primeiro.contains('smart') ||
+            segundo.contains('total')) {
+          continue;
+        }
+        resultado.add(valores);
+      }
+    }
+    return resultado;
+  }
+
+  static void _parseResumoGeral(String html, String mesAno, String per, SemobDataset ds) {
+    final rows = _extrairLinhasTabelaDados(html, 10);
+    for (final r in rows) {
+      final dt = _parseDataBR(r[0]);
+      if (dt == null) continue;
+      ds.resumos.add(ResumoDiario(
+        mesAno: mesAno,
+        periodicidade: per,
+        data: r[0],
+        dateTime: dt,
+        weekday: dt.weekday,
+        veiculos: _toInt(r[2]),
+        maxVeicFaixa: _toInt(r[3]),
+        viagensProg: _toInt(r[4]),
+        viagensRealiz: _toInt(r[5]),
+        difViagens: _toInt(r[6]),
+        kmProd: _toDouble(r[7]),
+        kmImprod: _toDouble(r[8]),
+        kmTotal: _toDouble(r[9]),
+      ));
+    }
+  }
+
+  static void _parsePassageiros(String html, String mesAnoPadrao, String per, SemobDataset ds) {
+    final rows = _extrairLinhasTabelaDados(html, 6);
+    for (final r in rows) {
+      final mesRaw = r[0];
+      final diaRaw = r[1].padLeft(2, '0');
+      final match = RegExp(r'^(\d{4})-(\d{2})$').firstMatch(mesRaw);
+      if (match == null) continue;
+      final dataBR = '$diaRaw/${match.group(2)}/${match.group(1)}';
+      final dt = _parseDataBR(dataBR);
+      if (dt == null) continue;
+
+      String mesLabel = mesAnoPadrao;
+      if (match.group(2) == '07') mesLabel = 'Julho/2026';
+      if (match.group(2) == '08') mesLabel = 'Agosto/2026';
+      if (match.group(2) == '09') mesLabel = 'Setembro/2026';
+
+      ds.passageiros.add(PassageiroDiario(
+        mesAno: mesLabel,
+        periodicidade: per,
+        data: dataBR,
+        dateTime: dt,
+        weekday: dt.weekday,
+        catraca: _toInt(r[2]),
+        antecipados: _toInt(r[3]),
+        naoPagantes: _toInt(r[4]),
+        totalPassageiros: _toInt(r[5]),
+      ));
+    }
+  }
+
+  static void _parseFcv(String html, String mesAno, String per, SemobDataset ds) {
+    final rows = _extrairLinhasTabelaDados(html, 9);
+    for (final r in rows) {
+      final dt = _parseDataBR(r[0]);
+      if (dt == null) continue;
+      ds.fcv.add(FcvDiario(
+        mesAno: mesAno,
+        periodicidade: per,
+        data: r[0],
+        dateTime: dt,
+        weekday: dt.weekday,
+        manhaProg: _toInt(r[1]),
+        manhaRealiz: _toInt(r[2]),
+        tardeProg: _toInt(r[3]),
+        tardeRealiz: _toInt(r[4]),
+        noiteProg: _toInt(r[5]),
+        noiteRealiz: _toInt(r[6]),
+        totalProg: _toInt(r[7]),
+        totalRealiz: _toInt(r[8]),
+      ));
+    }
+  }
+
+  static void _parseFxHr(String html, String mesAno, String per, SemobDataset ds) {
+    final rows = _extrairLinhasTabelaDados(html, 6);
+    for (final r in rows) {
+      final dt = _parseDataBR(r[0]);
+      if (dt == null) continue;
+      final fx = r[2];
+      final hora = int.tryParse(fx.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
+      ds.faixasHorarias.add(FaixaHorariaItem(
+        mesAno: mesAno,
+        periodicidade: per,
+        data: r[0],
+        dateTime: dt,
+        weekday: dt.weekday,
+        linha: r[1].padLeft(2, '0'),
+        hora: hora,
+        faixaTexto: fx,
+        veiculos: _toInt(r[3]),
+        viagens: _toInt(r[4]),
+        partidas: r[5],
+      ));
+    }
+  }
+
+  static void _parseLinhas(String html, String mesAno, String per, SemobDataset ds) {
+    final doc = html_parser.parse(html);
+    final tabelas = doc.querySelectorAll('table.data');
+
+    for (final tab in tabelas) {
+      final ths = tab.querySelectorAll('th').map((e) => e.text.trim().toLowerCase()).toList();
+      if (ths.length < 4) continue;
+
+      final idxData = ths.indexWhere((h) => h.contains('data'));
+      final idxLinha = ths.indexWhere((h) => h.contains('linha'));
+      final idxProg = ths.indexWhere((h) => h.contains('progr'));
+      final idxReal = ths.indexWhere((h) => h.contains('realiz') || h.contains('nrviagens') || h == 'viagens');
+      final idxKm = ths.indexWhere((h) => h.contains('kmtotal') || h.contains('km_total') || h == 'km');
+
+      if (idxData == -1 || idxLinha == -1) continue;
+
+      for (final tr in tab.querySelectorAll('tr')) {
+        final tds = tr.querySelectorAll('td').map((e) => e.text.trim()).toList();
+        if (tds.length < ths.length) continue;
+        final dt = _parseDataBR(tds[idxData]);
+        if (dt == null) continue;
+
+        final real = idxReal != -1 ? _toInt(tds[idxReal]) : 0;
+        final prog = idxProg != -1 ? _toInt(tds[idxProg]) : real;
+        final km = idxKm != -1 ? _toDouble(tds[idxKm]) : 0.0;
+
+        ds.linhas.add(LinhaDiaria(
+          mesAno: mesAno,
+          periodicidade: per,
+          data: tds[idxData],
+          dateTime: dt,
+          weekday: dt.weekday,
+          linha: tds[idxLinha].padLeft(2, '0'),
+          viagensProg: prog,
+          viagensRealiz: real,
+          kmTotal: km,
+        ));
+      }
+    }
+  }
+
+  static DateTime? _parseDataBR(String s) {
+    final p = s.trim().split('/');
+    if (p.length != 3) return null;
+    final d = int.tryParse(p[0]);
+    final m = int.tryParse(p[1]);
+    final y = int.tryParse(p[2]);
+    if (d == null || m == null || y == null) return null;
+    return DateTime(y, m, d);
+  }
+
+  static int _toInt(String s) {
+    final limpo = s.replaceAll('.', '').replaceAll(',', '.').trim();
+    return double.tryParse(limpo)?.round() ?? 0;
+  }
+
+  static double _toDouble(String s) {
+    final limpo = s.replaceAll('.', '').replaceAll(',', '.').trim();
+    return double.tryParse(limpo) ?? 0.0;
+  }
+}
