@@ -1,6 +1,6 @@
 import bcrypt
 from fastapi import HTTPException
-from backend.app.dao.usuario_dao import UsuarioDAO
+from app.dao.usuario_dao import UsuarioDAO
 from app.schemas.usuario_schema import UsuarioCreate, UsuarioResponse, UsuarioLogin
 from app.utils.token_config import criar_token_jwt
 
