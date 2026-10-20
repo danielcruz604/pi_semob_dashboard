@@ -32,3 +32,36 @@ class UsuarioController:
             papel=dados.papel
         )
 
+    def autenticar_usuario(self, credenciais: UsuarioLogin):
+        usuario_db = self.dao.buscar_por_email(credenciais.email)
+        
+        if not usuario_db:
+            raise HTTPException(status_code=401, detail="E-mail ou senha incorretos.")
+
+        senha_valida = bcrypt.checkpw(
+            credenciais.senha.encode('utf-8'),
+            usuario_db["senhaHash"].encode('utf-8')
+        )
+
+        if not senha_valida:
+            raise HTTPException(status_code=401, detail="E-mail ou senha incorretos.")
+
+        dados_para_token = {
+            "sub": str(usuario_db["_id"]),
+            "email": usuario_db["email"],
+            "papel": usuario_db["papel"]
+        }
+        
+        token_jwt = criar_token_jwt(dados_para_token)
+
+        # Retorna token junto com os dados para o front
+        return {
+            "access_token": token_jwt,
+            "token_type": "bearer",
+            "usuario": {
+                "id": str(usuario_db["_id"]),
+                "nome": usuario_db["nome"],
+                "email": usuario_db["email"],
+                "papel": usuario_db["papel"]
+            }
+        }
