@@ -5,3 +5,6 @@ pydantic
 pydantic[email]
 python-dotenv
 bcrypt
+pyjwt
+pytest
+httpx2
