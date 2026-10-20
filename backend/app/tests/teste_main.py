@@ -100,3 +100,8 @@ def teste_exception_nao_tratada_no_startup_nao_e_engolida(monkeypatch, fabrica_f
     with pytest.raises(KeyError):
         with TestClient(main.app):
             pass
+
+def teste_rotas_ficam_sob_o_prefixo_api(client):
+    caminhos = client.get("/openapi.json").json()["paths"]
+    assert {"/api/transporte/processar-html", "/api/transporte/processar-e-salvar"} <= set(caminhos)
+    assert all(c.startswith("/api/") for c in caminhos)

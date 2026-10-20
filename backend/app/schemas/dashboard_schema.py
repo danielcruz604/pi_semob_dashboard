@@ -1,0 +1,119 @@
+from typing import Any, Dict, List, Optional
+from pydantic import BaseModel
+
+
+class PeriodoFiltroSchema(BaseModel):
+    data_inicio: Optional[str] = None
+    data_fim: Optional[str] = None
+    agrupamento: Optional[str] = None
+    linha: Optional[str] = None
+
+
+class FiltrosDisponiveisSchema(BaseModel):
+    data_minima: Optional[str] = None
+    data_maxima: Optional[str] = None
+    linhas: List[str]
+    agrupamentos: List[str]
+    classificacoes_ocorrencia: List[str]
+
+
+class QuilometragemKpiSchema(BaseModel):
+    km_total: float
+    km_produtivo: float
+    km_improdutivo: float
+    taxa_improdutiva_percentual: float
+    media_diaria_km: float
+
+
+class ViagensKpiSchema(BaseModel):
+    programadas: int
+    realizadas: int
+    diferenca: int
+    fcv_medio: float
+    por_periodo: Dict[str, Dict[str, float]]
+
+
+class PassageirosKpiSchema(BaseModel):
+    pagantes: int
+    catraca: int
+    antecipados: int
+    nao_pagantes: int
+    total_geral: int
+    percentual_gratuidade: float
+
+
+class FinanceiroKpiSchema(BaseModel):
+    total_vendas: float
+    total_utilizacao: float
+    creditos_transferidos_cartoes: float
+    credito_circulante_acumulado: float
+    saldo_final_recente: Optional[float] = None
+    receita_por_km: float
+
+
+class ResumoOperacionalSchema(BaseModel):
+    periodo: PeriodoFiltroSchema
+    quilometragem: QuilometragemKpiSchema
+    viagens: ViagensKpiSchema
+    passageiros: PassageirosKpiSchema
+    financeiro: FinanceiroKpiSchema
+
+
+class ItemSerieTemporalSchema(BaseModel):
+    referencia: str
+    km_total: float
+    km_produtivo: float
+    km_improdutivo: float
+    viagens_programadas: int
+    viagens_realizadas: int
+    fcv: float
+    passageiros_pagantes: int
+    passageiros_nao_pagantes: int
+    total_passageiros: int
+    total_vendas: float
+    total_utilizacao: float
+    credito_circulante: float
+    receita_por_km: float
+
+
+class SerieTemporalResponseSchema(BaseModel):
+    periodo: PeriodoFiltroSchema
+    total_pontos: int
+    serie: List[ItemSerieTemporalSchema]
+
+
+class LinhaRankingSchema(BaseModel):
+    linha: str
+    km_total: float
+    viagens: int
+    media_km_por_viagem: float
+    participacao_km_percentual: float
+
+
+class HorarioLinhaSchema(BaseModel):
+    data: str
+    linha: str
+    hora: int
+    numero_veiculos: Optional[int] = None
+    viagens: Optional[int] = None
+    partidas: List[int]
+
+
+class DesvioOperacionalSchema(BaseModel):
+    data: str
+    tipo: str
+    indicador: str
+    valor_observado: float
+    valor_referencia: float
+    desvio_percentual: Optional[float] = None
+    descricao: str
+
+
+class AnomaliasResponseSchema(BaseModel):
+    periodo: PeriodoFiltroSchema
+    parametros_tolerancia: Dict[str, float]
+    total_ocorrencias_viagens: int
+    ocorrencias_por_classificacao: Dict[str, int]
+    ocorrencias: List[Dict[str, Any]]
+    total_desvios_operacionais: int
+    desvios_operacionais: List[DesvioOperacionalSchema]
