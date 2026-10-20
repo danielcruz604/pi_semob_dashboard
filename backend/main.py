@@ -7,6 +7,7 @@ from app.services.transporte_repository import garantir_indices
 from app.utils.connection_factory import ConnectionFactory
 from app.routes.dashboard_route import router as dashboard_router
 from fastapi.middleware.cors import CORSMiddleware
+from app.routes import usuario_routes
 
 logger = logging.getLogger(__name__)
 
@@ -32,3 +33,6 @@ app.add_middleware(
 
 app.include_router(transporte_router, prefix="/api")
 app.include_router(dashboard_router, prefix="/api")
+
+app.include_router(usuario_routes.router, prefix="/api")
+
