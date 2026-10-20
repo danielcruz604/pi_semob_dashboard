@@ -15,3 +15,9 @@ def criar_usuario(usuario: UsuarioCreate):
 def login_usuario(credenciais: UsuarioLogin):
     return service.autenticar_usuario(credenciais)
 
+@router.get("/perfil")
+def buscar_perfil(usuario_logado: dict = Depends(verificar_token)):
+    return {
+        "mensagem": "Acesso autorizado ao perfil interno do sistema",
+        "dados_do_usuario": usuario_logado
+    }
