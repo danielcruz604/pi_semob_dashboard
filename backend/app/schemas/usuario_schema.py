@@ -11,3 +11,7 @@ class UsuarioResponse(BaseModel):
     nome: str
     email: str
     papel: str
+
+class UsuarioLogin(BaseModel):
+    email: EmailStr
+    senha: str
