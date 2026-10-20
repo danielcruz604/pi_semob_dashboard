@@ -3,7 +3,7 @@ import bcrypt
 from fastapi.testclient import TestClient
 from unittest.mock import patch
 
-from app.main import app
+from main import app
 from app.utils.token_config import criar_token_jwt
 
 client = TestClient(app)
@@ -24,7 +24,7 @@ usuario_mock = {
 def test_login_com_sucesso(mock_buscar):
     mock_buscar.return_value = usuario_mock
 
-    resposta = client.post("/usuarios/login", json={
+    resposta = client.post("/api/usuarios/login", json={
         "email": "teste@teste.com",
         "senha": SENHA_TESTE
     })
@@ -42,7 +42,7 @@ def test_login_senha_incorreta(mock_buscar):
     
     mock_buscar.return_value = usuario_mock
     
-    resposta = client.post("/usuarios/login", json={
+    resposta = client.post("/api/usuarios/login", json={
         "email": "teste@teste.com",
         "senha": "Senha321"
     })
@@ -59,7 +59,7 @@ def test_acesso_rota_protegida_com_token_valido():
         "papel": usuario_mock["papel"]
     })
     
-    resposta = client.get("/usuarios/perfil", headers={
+    resposta = client.get("/api/usuarios/perfil", headers={
         "Authorization": f"Bearer {token_valido}"
     })
     
@@ -72,13 +72,13 @@ def test_acesso_rota_protegida_com_token_valido():
 def test_acesso_rota_protegida_com_token_invalido():
     token_falso = "token_falso"
     
-    resposta = client.get("/usuarios/perfil", headers={
+    resposta = client.get("/api/usuarios/perfil", headers={
         "Authorization": f"Bearer {token_falso}"
     })
     
     assert resposta.status_code == 401
     assert resposta.json()["detail"] == "Token inválido ou adulterado."
     
-    resposta_sem_token = client.get("/usuarios/perfil")
+    resposta_sem_token = client.get("/api/usuarios/perfil")
     
     assert resposta_sem_token.status_code == 401
