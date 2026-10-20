@@ -10,3 +10,8 @@ service = UsuarioController()
 @router.post("/", response_model=UsuarioResponse, status_code=201)
 def criar_usuario(usuario: UsuarioCreate):
     return service.registrar_usuario(usuario)
+
+@router.post("/login")
+def login_usuario(credenciais: UsuarioLogin):
+    return service.autenticar_usuario(credenciais)
+
