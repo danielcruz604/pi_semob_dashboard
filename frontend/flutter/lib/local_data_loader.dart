@@ -2,6 +2,10 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:html/parser.dart' as html_parser;
 import 'folder_scanner_io.dart' if (dart.library.html) 'folder_scanner_web.dart';
+import 'relatorio_api_service.dart';
+export 'folder_scanner_io.dart' if (dart.library.html) 'folder_scanner_web.dart' show ArquivoLido;
+export 'relatorio_api_service.dart';
+export 'relatorio_integration.dart';
 
 class SemobDataset {
   final List<ResumoDiario> resumos = [];
@@ -9,6 +13,15 @@ class SemobDataset {
   final List<FcvDiario> fcv = [];
   final List<FaixaHorariaItem> faixasHorarias = [];
   final List<LinhaDiaria> linhas = [];
+
+  ///Mantém os arquivos HTML brutos carregados para envio sob demanda ao backend FastAPI
+  final List<ArquivoLido> arquivosHtmlCarregados = [];
+
+  ///Último relatório consolidado retornado pelo backend para o conjunto de dados ativo
+  RelatorioConsolidado? ultimoRelatorioBackend;
+
+  ///Resultado do último envio em lote de arquivos HTML para o backend.
+  RelatorioUploadIntegrado? ultimoUploadIntegrado;
 
   static const Map<String, int> _ordemMeses = {
     'janeiro': 1,
@@ -31,7 +44,8 @@ class SemobDataset {
       passageiros.isEmpty &&
       fcv.isEmpty &&
       faixasHorarias.isEmpty &&
-      linhas.isEmpty;
+      linhas.isEmpty &&
+      arquivosHtmlCarregados.isEmpty;
 
   static int _chaveOrdenacaoMes(String mesAno) {
     final partes = mesAno.toLowerCase().split('/');
@@ -204,6 +218,12 @@ class LinhaDiaria {
 }
 
 class LocalDataLoader {
+  /// Verifica se o arquivo possui extensão `.html` ou `.htm` aceita pelo backend.
+  static bool arquivoEhHtmlSuportado(String nomeArquivo) {
+    final nome = nomeArquivo.toLowerCase().trim();
+    return nome.endsWith('.html') || nome.endsWith('.htm');
+  }
+
   static bool arquivoEhRelatorioUtil(String nomeArquivo) {
     final nome = nomeArquivo.toLowerCase().trim();
     if (!nome.endsWith('.html') && !nome.endsWith('.htm')) return false;
@@ -251,16 +271,19 @@ class LocalDataLoader {
 
     final arquivosLidos = await escanearPastaNativa(
       caminhoEscolhido,
-      arquivoEhRelatorioUtil,
+      arquivoEhHtmlSuportado,
     );
 
     for (final arq in arquivosLidos) {
-      _processarArquivoIndividual(
-        nomeArquivo: arq.nome,
-        caminhoCompleto: arq.caminho,
-        bytes: arq.bytes,
-        dataset: dataset,
-      );
+      dataset.arquivosHtmlCarregados.add(arq);
+      if (arquivoEhRelatorioUtil(arq.nome)) {
+        _processarArquivoIndividual(
+          nomeArquivo: arq.nome,
+          caminhoCompleto: arq.caminho,
+          bytes: arq.bytes,
+          dataset: dataset,
+        );
+      }
     }
 
     return dataset;
@@ -271,7 +294,7 @@ class LocalDataLoader {
     for (final arquivo in files) {
       try {
         final String nome = arquivo.name?.toString() ?? 'relatorio.html';
-        if (!arquivoEhRelatorioUtil(nome)) continue;
+        if (!arquivoEhHtmlSuportado(nome)) continue;
 
         final List<int> bytes = await arquivo.readAsBytes();
         String caminho = nome;
@@ -281,15 +304,80 @@ class LocalDataLoader {
           } catch (_) {}
         }
 
-        _processarArquivoIndividual(
-          nomeArquivo: nome,
-          caminhoCompleto: caminho,
-          bytes: bytes,
-          dataset: dataset,
+        dataset.arquivosHtmlCarregados.add(
+          ArquivoLido(
+            nome: nome,
+            caminho: caminho,
+            bytes: bytes,
+          ),
         );
+
+        if (arquivoEhRelatorioUtil(nome)) {
+          _processarArquivoIndividual(
+            nomeArquivo: nome,
+            caminhoCompleto: caminho,
+            bytes: bytes,
+            dataset: dataset,
+          );
+        }
       } catch (_) {}
     }
     return dataset;
+  }
+
+  ///Envia um único `ArquivoLido` para o backend processar e salvar no MongoDB.
+  static Future<ResultadoProcessamentoHtml> enviarArquivoIndividualParaBackend(
+    ArquivoLido arquivo, {
+    bool persistirNoBanco = true,
+  }) {
+    return RelatorioApiService.enviarArquivoHtmlIndividual(
+      nomeArquivo: arquivo.nome,
+      bytes: arquivo.bytes,
+      persistirNoBanco: persistirNoBanco,
+    );
+  }
+
+  ///Sincroniza os arquivos HTML carregados no `dataset` com o backend e retorna o
+  ///`RelatorioConsolidado` gerado pelo servidor. Caso nenhum arquivo local esteja em memória,
+  ///solicita o relatório consolidado diretamente do banco de dados do backend
+  static Future<RelatorioConsolidado> sincronizarEGerarRelatorio({
+    required SemobDataset dataset,
+    String agrupamento = 'diario',
+    String? dataInicio,
+    String? dataFim,
+    String? linha,
+    double toleranciaDesvioKmPct = 15.0,
+    double limiarFcv = 0.98,
+    double limiarKmImprodPct = 10.0,
+    bool enviarArquivosEmMemoria = true,
+  }) async {
+    if (enviarArquivosEmMemoria && dataset.arquivosHtmlCarregados.isNotEmpty) {
+      final resultadoLote = await RelatorioApiService.enviarLoteArquivosEGerarRelatorio(
+        arquivos: dataset.arquivosHtmlCarregados,
+        agrupamento: agrupamento,
+        dataInicio: dataInicio,
+        dataFim: dataFim,
+        linha: linha,
+        toleranciaDesvioKmPct: toleranciaDesvioKmPct,
+        limiarFcv: limiarFcv,
+        limiarKmImprodPct: limiarKmImprodPct,
+      );
+      dataset.ultimoUploadIntegrado = resultadoLote;
+      dataset.ultimoRelatorioBackend = resultadoLote.relatorio;
+      return resultadoLote.relatorio;
+    }
+
+    final relatorio = await RelatorioApiService.gerarRelatorioConsolidado(
+      agrupamento: agrupamento,
+      dataInicio: dataInicio,
+      dataFim: dataFim,
+      linha: linha,
+      toleranciaDesvioKmPct: toleranciaDesvioKmPct,
+      limiarFcv: limiarFcv,
+      limiarKmImprodPct: limiarKmImprodPct,
+    );
+    dataset.ultimoRelatorioBackend = relatorio;
+    return relatorio;
   }
 
   static void _processarArquivoIndividual({
@@ -511,7 +599,7 @@ class LocalDataLoader {
     }
   }
 
-  static DateTime? _parseDataBR(String s) {
+  static DateTime? parseDataBR(String s) {
     final p = s.trim().split('/');
     if (p.length != 3) return null;
     final d = int.tryParse(p[0]);
@@ -521,10 +609,9 @@ class LocalDataLoader {
     return DateTime(y, m, d);
   }
 
-  static int _toInt(String s) {
-    final limpo = s.replaceAll('.', '').replaceAll(',', '.').trim();
-    return double.tryParse(limpo)?.round() ?? 0;
-  }
+  static DateTime? _parseDataBR(String s) => parseDataBR(s);
+
+  static int _toInt(String s) => _toDouble(s).round();
 
   static double _toDouble(String s) {
     final limpo = s.replaceAll('.', '').replaceAll(',', '.').trim();

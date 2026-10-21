@@ -133,6 +133,7 @@ class _DashboardPageState extends State<DashboardPage> {
       return;
     }
 
+    if (!mounted) return;
     final mesInicial = ds.mesesDisponiveis.isNotEmpty ? ds.mesesDisponiveis.first : 'Agosto/2026';
     final perInicial = _obterPeriodicidadeValida(ds, mesInicial, 'Mensal');
 
@@ -235,13 +236,139 @@ class _DashboardPageState extends State<DashboardPage> {
 
   static String _fmtCurto(String dataBR) => dataBR.length >= 5 ? dataBR.substring(0, 5) : dataBR;
 
-  static DateTime _parseStrToDate(String s) {
-    final p = s.split('/');
-    if (p.length != 3) return DateTime(2026);
-    return DateTime(int.parse(p[2]), int.parse(p[1]), int.parse(p[0]));
+  static DateTime _parseStrToDate(String s) => LocalDataLoader.parseDataBR(s) ?? DateTime(2026);
+
+  late final RelatorioIntegrationController relatorioController = RelatorioIntegrationController();
+
+  @override
+  void dispose() {
+    relatorioController.dispose();
+    super.dispose();
+  }
+
+  bool _gerandoRelatorio = false;
+  RelatorioConsolidado? _ultimoRelatorioConsolidado;
+  String? _ultimoRelatorioTexto;
+  String? _erroRelatorio;
+
+  bool get gerandoRelatorio => _gerandoRelatorio;
+  RelatorioConsolidado? get ultimoRelatorioConsolidado => _ultimoRelatorioConsolidado;
+  String? get ultimoRelatorioTexto => _ultimoRelatorioTexto;
+  String? get erroRelatorio => _erroRelatorio;
+
+  static String _fmtDataISO(DateTime d) =>
+      '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+  ///Retorna os filtros ativos no estado do painel já convertidos para o contrato da API
+  Map<String, String?> obterFiltrosAtivosParaApi({String agrupamento = 'diario'}) {
+    DateTime? inicio = _dataInicio;
+    DateTime? fim = _dataFim;
+
+    if (_modoAtivo == ModoAnalise.compararDiasSemana && _datasMarcadasComparacao.isNotEmpty) {
+      final datas = _datasMarcadasComparacao.map(_parseStrToDate).toList()..sort();
+      inicio = datas.first;
+      fim = datas.last;
+    } else if (inicio == null || fim == null) {
+      final globais = _todasAsDatasGlobal();
+      if (globais.isNotEmpty) {
+        inicio ??= globais.first;
+        fim ??= globais.last;
+      }
+    }
+
+    return {
+      'agrupamento': agrupamento,
+      'data_inicio': inicio != null ? _fmtDataISO(inicio) : null,
+      'data_fim': fim != null ? _fmtDataISO(fim) : null,
+      'linha': _linhaSelecionada,
+    };
+  }
+
+  ///Ponto de acoplamento pronto para o botão de geração de relatório (onPressed: gerarRelatorioIntegrado).
+  ///Envia os HTMLs carregados e solicita o relatório consolidado ao backend FastAPI
+  Future<RelatorioConsolidado?> gerarRelatorioIntegrado({
+    String agrupamento = 'diario',
+    bool sincronizarArquivosLocais = true,
+    double toleranciaDesvioKmPct = 15.0,
+    double limiarFcv = 0.98,
+    double limiarKmImprodPct = 10.0,
+    bool exibirFeedbackSnackBar = true,
+  }) async {
+    if (_gerandoRelatorio) return _ultimoRelatorioConsolidado;
+
+    final filtros = obterFiltrosAtivosParaApi(agrupamento: agrupamento);
+    setState(() {
+      _gerandoRelatorio = true;
+      _erroRelatorio = null;
+    });
+
+    try {
+      final relatorio = await LocalDataLoader.sincronizarEGerarRelatorio(
+        dataset: _dataset,
+        agrupamento: filtros['agrupamento'] ?? 'diario',
+        dataInicio: filtros['data_inicio'],
+        dataFim: filtros['data_fim'],
+        linha: filtros['linha'],
+        toleranciaDesvioKmPct: toleranciaDesvioKmPct,
+        limiarFcv: limiarFcv,
+        limiarKmImprodPct: limiarKmImprodPct,
+        enviarArquivosEmMemoria: sincronizarArquivosLocais,
+      );
+      final resumoTexto = RelatorioApiService.formatarResumoRelatorio(relatorio);
+
+      if (mounted) {
+        setState(() {
+          _gerandoRelatorio = false;
+          _ultimoRelatorioConsolidado = relatorio;
+          _ultimoRelatorioTexto = resumoTexto;
+        });
+        if (exibirFeedbackSnackBar) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'Relatório consolidado gerado com sucesso (${relatorio.serieTemporal.totalPontos} períodos analisados).',
+              ),
+              backgroundColor: const Color(0xFF059669),
+            ),
+          );
+        }
+      }
+      return relatorio;
+    } catch (e) {
+      final msgErro = e.toString();
+      if (mounted) {
+        setState(() {
+          _gerandoRelatorio = false;
+          _erroRelatorio = msgErro;
+        });
+        if (exibirFeedbackSnackBar) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(msgErro),
+              backgroundColor: Colors.redAccent,
+            ),
+          );
+        }
+      }
+      return null;
+    }
+  }
+
+  ///Gera o relatório consolidado via API e devolve diretamente o texto estruturado para exportação/exibição
+  Future<String?> gerarTextoRelatorioConsolidado({
+    String agrupamento = 'diario',
+    bool sincronizarArquivosLocais = true,
+  }) async {
+    final relatorio = await gerarRelatorioIntegrado(
+      agrupamento: agrupamento,
+      sincronizarArquivosLocais: sincronizarArquivosLocais,
+    );
+    if (relatorio == null) return null;
+    return _ultimoRelatorioTexto ?? RelatorioApiService.formatarResumoRelatorio(relatorio);
   }
 
   void _sairParaTelaDeLogin() {
+    RelatorioApiService.limparSessao();
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(builder: (_) => const LoginPage()),
@@ -915,7 +1042,7 @@ class _DashboardPageState extends State<DashboardPage> {
       totalGratuitos += p.naoPagantes;
     }
 
-    final fcvPercent = prog > 0 ? (realiz / prog) * 100 : 100.0;
+    final fcvPercent = prog > 0 ? (realiz / prog) * 100 : 0.0;
     final ipk = kmTotal > 0 ? totalPass / kmTotal : 0.0;
     final percGratuidade = totalPass > 0 ? (totalGratuitos / totalPass) * 100 : 0.0;
 

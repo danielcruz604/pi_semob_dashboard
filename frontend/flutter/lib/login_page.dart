@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'dashboard_page.dart';
+import 'relatorio_api_service.dart';
 
 class UsuarioCadastrado {
   final String nome;
@@ -80,6 +81,20 @@ class _LoginPageState extends State<LoginPage> {
     final emailDigitado = _emailController.text.trim().toLowerCase();
     final senhaDigitada = _senhaController.text.trim();
 
+    bool autenticadoViaApi = false;
+    String? erroApiCredenciais;
+    try {
+      await RelatorioApiService.autenticarUsuario(
+        email: emailDigitado,
+        senha: senhaDigitada,
+      );
+      autenticadoViaApi = true;
+    } on RelatorioApiException catch (e) {
+      if (e.statusCode == 401) {
+        erroApiCredenciais = e.message;
+      }
+    } catch (_) {}
+
     final usuarioEncontrado = _bancoDeUsuarios.cast<UsuarioCadastrado?>().firstWhere(
           (u) => u?.email.toLowerCase() == emailDigitado && u?.senha == senhaDigitada,
           orElse: () => null,
@@ -87,7 +102,7 @@ class _LoginPageState extends State<LoginPage> {
 
     if (!mounted) return;
 
-    if (usuarioEncontrado != null) {
+    if (autenticadoViaApi || usuarioEncontrado != null) {
       setState(() => _autenticando = false);
       Navigator.pushReplacement(
         context,
@@ -96,7 +111,8 @@ class _LoginPageState extends State<LoginPage> {
     } else {
       setState(() {
         _autenticando = false;
-        _mensagemErro = 'E-mail ou senha incorretos. Utilize uma credencial válida.';
+        _mensagemErro =
+            erroApiCredenciais ?? 'E-mail ou senha incorretos. Utilize uma credencial válida.';
       });
     }
   }
