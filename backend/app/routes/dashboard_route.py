@@ -7,10 +7,12 @@ from app.schemas.dashboard_schema import (
     FiltrosDisponiveisSchema,
     HorarioLinhaSchema,
     LinhaRankingSchema,
+    RelatorioConsolidadoSchema,
     ResumoOperacionalSchema,
     SerieTemporalResponseSchema,
 )
 from app.services.dashboard_service import (
+    gerar_relatorio_operacional,
     obter_anomalias,
     obter_filtros_disponiveis,
     obter_horarios_linhas,
@@ -102,6 +104,28 @@ def anomalias_operacionais(
         data_fim=data_fim,
         linha=linha,
         classificacao=classificacao,
+        tolerancia_desvio_km_pct=tolerancia_desvio_km_pct,
+        limiar_fcv=limiar_fcv,
+        limiar_km_improd_pct=limiar_km_improd_pct,
+    )
+
+@router.get("/relatorio", response_model=RelatorioConsolidadoSchema)
+@router.post("/relatorio/gerar", response_model=RelatorioConsolidadoSchema)
+def relatorio_consolidado(
+    agrupamento: str = Query("diario", description="diario, semanal ou mensal"),
+    data_inicio: Optional[str] = Query(None, description="Data inicial (YYYY-MM-DD)"),
+    data_fim: Optional[str] = Query(None, description="Data final (YYYY-MM-DD)"),
+    linha: Optional[str] = Query(None, description="Código da linha (ex.: 01)"),
+    tolerancia_desvio_km_pct: float = Query(15.0, ge=0.0, description="Tolerância (%) de desvio da média de km"),
+    limiar_fcv: float = Query(0.98, ge=0.0, le=1.0, description="Alerta para FCV abaixo deste valor"),
+    limiar_km_improd_pct: float = Query(10.0, ge=0.0, description="Alerta para % de km improdutivo acima deste valor"),
+):
+    return _executar_consulta(
+        gerar_relatorio_operacional,
+        agrupamento=agrupamento,
+        data_inicio=data_inicio,
+        data_fim=data_fim,
+        linha=linha,
         tolerancia_desvio_km_pct=tolerancia_desvio_km_pct,
         limiar_fcv=limiar_fcv,
         limiar_km_improd_pct=limiar_km_improd_pct,

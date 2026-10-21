@@ -1,5 +1,6 @@
+import math
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from pymongo.database import Database
 from app.services.transporte_repository import (
@@ -13,6 +14,21 @@ from app.services.transporte_repository import (
 
 AGRUPAMENTOS_VALIDOS = {"diario", "semanal", "mensal"}
 CLASSIFICACOES_OCORRENCIA = ["NaoIniciada", "NaoRealizada", "NaoTerminada"]
+
+def _calcular_media(valores: List[float]) -> float:
+    return (sum(valores) / len(valores)) if valores else 0.0
+
+def _calcular_desvio_padrao(valores: List[float]) -> float:
+    if len(valores) < 2:
+        return 0.0
+    media = _calcular_media(valores)
+    variancia = sum((v - media) ** 2 for v in valores) / len(valores)
+    return math.sqrt(variancia)
+
+def _calcular_z_score(valor: float, media: float, desvio_padrao: float) -> Optional[float]:
+    if desvio_padrao <= 0:
+        return None
+    return round((valor - media) / desvio_padrao, 4)
 
 def montar_filtro_data(
     data_inicio: Optional[str] = None, data_fim: Optional[str] = None
@@ -342,8 +358,13 @@ def obter_anomalias(
     cursor_oc = db[COL_VIAGENS_OCORRENCIAS].find(filtro_oc, {"_id": 0}).sort("inicioProgramado", -1)
     ocorrencias = []
     por_classificacao: Dict[str, int] = defaultdict(int)
+    ocorrencias_por_dia: Dict[str, int] = defaultdict(int)
+
     for doc in cursor_oc:
         item = dict(doc)
+        dt_oc = item.get("data")
+        if isinstance(dt_oc, datetime):
+            ocorrencias_por_dia[dt_oc.strftime("%Y-%m-%d")] += 1
         for campo_dt in ("data", "inicioProgramado", "inicioRealizado", "fimProgramado", "fimRealizado"):
             if isinstance(item.get(campo_dt), datetime):
                 fmt = "%Y-%m-%d" if campo_dt == "data" else "%Y-%m-%dT%H:%M:%S"
@@ -354,7 +375,18 @@ def obter_anomalias(
 
     docs_viagens = list(db[COL_VIAGENS_SISTEMA].find(filtro, {"_id": 0}).sort("data", 1))
     kms_validos = [float(d["kmTotal"]) for d in docs_viagens if (d.get("kmTotal") or 0) > 0]
-    media_km = (sum(kms_validos) / len(kms_validos)) if kms_validos else 0.0
+    viagens_validas = [
+        float(d["nrTotalViagensRealizadas"])
+        for d in docs_viagens
+        if (d.get("nrTotalViagensRealizadas") or 0) > 0
+    ]
+    fcvs_validos = [float(d["fcvTotal"]) for d in docs_viagens if d.get("fcvTotal") is not None]
+    media_km = _calcular_media(kms_validos)
+    dp_km = _calcular_desvio_padrao(kms_validos)
+    media_viagens = _calcular_media(viagens_validas)
+    dp_viagens = _calcular_desvio_padrao(viagens_validas)
+    media_fcv = _calcular_media(fcvs_validos)
+    dp_fcv = _calcular_desvio_padrao(fcvs_validos)
 
     desvios: List[Dict[str, Any]] = []
     for d in docs_viagens:
@@ -365,16 +397,20 @@ def obter_anomalias(
         if media_km > 0 and km_dia > 0:
             desvio_km_pct = abs(km_dia - media_km) / media_km * 100
             if desvio_km_pct > tolerancia_desvio_km_pct:
+                z_km = _calcular_z_score(km_dia, media_km, dp_km)
                 desvios.append({
                     "data": dt_str,
                     "tipo": "desvio_quilometragem_media",
                     "indicador": "kmTotal",
                     "valor_observado": round(km_dia, 2),
                     "valor_referencia": round(media_km, 2),
+                    "desvio_padrao_referencia": round(dp_km, 2),
+                    "z_score": z_km,
                     "desvio_percentual": round(desvio_km_pct, 2),
                     "descricao": (
                         f"Quilometragem do dia ({km_dia:.2f} km) desviou {desvio_km_pct:.2f}% "
-                        f"da média do período ({media_km:.2f} km), acima do limite de {tolerancia_desvio_km_pct:.1f}%."
+                        f"da média do período ({media_km:.2f} km, DP={dp_km:.2f} km), "
+                        f"acima do limite de {tolerancia_desvio_km_pct:.1f}%."
                     ),
                 })
 
@@ -382,14 +418,41 @@ def obter_anomalias(
         fcv = d.get("fcvTotal")
         if fcv is not None and float(fcv) < limiar_fcv:
             fcv_val = float(fcv)
+            z_fcv = _calcular_z_score(fcv_val, media_fcv, dp_fcv)
             desvios.append({
                 "data": dt_str,
                 "tipo": "fcv_abaixo_da_meta",
                 "indicador": "fcvTotal",
                 "valor_observado": round(fcv_val, 4),
                 "valor_referencia": round(limiar_fcv, 4),
+                "desvio_padrao_referencia": round(dp_fcv, 4),
+                "z_score": z_fcv,
                 "desvio_percentual": round((limiar_fcv - fcv_val) * 100, 2),
                 "descricao": f"FCV diário ({fcv_val:.2%}) abaixo do limiar esperado ({limiar_fcv:.2%}).",
+            })
+
+        #Ausência inexplicada de viagens
+        prog_dia = int(d.get("nrViagensProg") or 0)
+        real_dia = int(d.get("nrTotalViagensRealizadas") or 0)
+        faltantes = max(prog_dia - real_dia, 0)
+        justificadas = ocorrencias_por_dia.get(dt_str, 0)
+        if faltantes > justificadas:
+            inexplicadas = faltantes - justificadas
+            pct_inexplicadas = (inexplicadas / prog_dia * 100) if prog_dia > 0 else 0.0
+            z_viagens = _calcular_z_score(float(real_dia), media_viagens, dp_viagens)
+            desvios.append({
+                "data": dt_str,
+                "tipo": "ausencia_inexplicada_viagens",
+                "indicador": "nrTotalViagensRealizadas",
+                "valor_observado": float(real_dia),
+                "valor_referencia": float(prog_dia),
+                "desvio_padrao_referencia": round(dp_viagens, 2),
+                "z_score": z_viagens,
+                "desvio_percentual": round(pct_inexplicadas, 2),
+                "descricao": (
+                    f"Ausência inexplicada de {inexplicadas} viagens no dia "
+                    f"({prog_dia} programadas, {real_dia} realizadas, {justificadas} ocorrências registradas)."
+                ),
             })
 
         #Taxa de quilometragem improdutiva elevada
@@ -403,10 +466,76 @@ def obter_anomalias(
                     "indicador": "kmImprodTotal",
                     "valor_observado": round(pct_improd, 2),
                     "valor_referencia": round(limiar_km_improd_pct, 2),
+                    "desvio_padrao_referencia": None,
+                    "z_score": None,
                     "desvio_percentual": round(pct_improd - limiar_km_improd_pct, 2),
                     "descricao": (
                         f"Quilometragem improdutiva representou {pct_improd:.2f}% do total "
                         f"(limite: {limiar_km_improd_pct:.1f}%)."
+                    ),
+                })
+
+    #Discrepancias tarifarias cruzamento entre passageiros pagantes e utilizacao financeira
+    pass_por_data = {
+        d["data"]: _calcular_pagantes(d)
+        for d in db[COL_PASSAGEIROS_SISTEMA].find(filtro, {"_id": 0})
+        if isinstance(d.get("data"), datetime)
+    }
+    fin_por_data = {
+        d["data"]: d
+        for d in db[COL_FINANCEIRO_SISTEMA].find(filtro, {"_id": 0})
+        if isinstance(d.get("data"), datetime)
+    }
+    tarifas_efetivas = [
+        float(fin_por_data[dt].get("totalUtilizacao") or 0.0) / pag
+        for dt, pag in pass_por_data.items()
+        if dt in fin_por_data and pag > 0 and (fin_por_data[dt].get("totalUtilizacao") or 0) > 0
+    ]
+    media_tarifa = _calcular_media(tarifas_efetivas)
+    dp_tarifa = _calcular_desvio_padrao(tarifas_efetivas)
+
+    for dt, pagantes_dia in sorted(pass_por_data.items()):
+        if pagantes_dia <= 0:
+            continue
+        doc_fin = fin_por_data.get(dt) or {}
+        utilizacao_dia = float(doc_fin.get("totalUtilizacao") or 0.0)
+        dt_str = dt.strftime("%Y-%m-%d")
+
+        if utilizacao_dia <= 0:
+            desvios.append({
+                "data": dt_str,
+                "tipo": "discrepancia_tarifaria",
+                "indicador": "totalUtilizacao",
+                "valor_observado": 0.0,
+                "valor_referencia": float(pagantes_dia),
+                "desvio_padrao_referencia": round(dp_tarifa, 4),
+                "z_score": None,
+                "desvio_percentual": 100.0,
+                "descricao": (
+                    f"Discrepância tarifária: registrados {pagantes_dia} passageiros pagantes, "
+                    "porém sem utilização financeira correspondente."
+                ),
+            })
+        elif media_tarifa > 0:
+            tarifa_dia = utilizacao_dia / pagantes_dia
+            desvio_tarifa_pct = abs(tarifa_dia - media_tarifa) / media_tarifa * 100
+            z_tarifa = _calcular_z_score(tarifa_dia, media_tarifa, dp_tarifa)
+            ultrapassou_dp = z_tarifa is not None and abs(z_tarifa) >= 1.0
+
+            if desvio_tarifa_pct > tolerancia_desvio_km_pct or ultrapassou_dp:
+                desvios.append({
+                    "data": dt_str,
+                    "tipo": "discrepancia_tarifaria",
+                    "indicador": "tarifaEfetivaMedia",
+                    "valor_observado": round(tarifa_dia, 4),
+                    "valor_referencia": round(media_tarifa, 4),
+                    "desvio_padrao_referencia": round(dp_tarifa, 4),
+                    "z_score": z_tarifa,
+                    "desvio_percentual": round(desvio_tarifa_pct, 2),
+                    "descricao": (
+                        f"Discrepância tarifária: tarifa efetiva do dia (R$ {tarifa_dia:.2f}) "
+                        f"desviou {desvio_tarifa_pct:.2f}% da média histórica "
+                        f"(R$ {media_tarifa:.2f}, DP={dp_tarifa:.2f})."
                     ),
                 })
 
@@ -422,9 +551,60 @@ def obter_anomalias(
             "limiar_fcv": limiar_fcv,
             "limiar_km_improd_pct": limiar_km_improd_pct,
         },
+        "estatisticas_historicas": {
+            "media_km": round(media_km, 2),
+            "desvio_padrao_km": round(dp_km, 2),
+            "media_viagens_realizadas": round(media_viagens, 2),
+            "desvio_padrao_viagens": round(dp_viagens, 2),
+            "media_fcv": round(media_fcv, 4),
+            "desvio_padrao_fcv": round(dp_fcv, 4),
+            "media_tarifa_efetiva": round(media_tarifa, 4),
+            "desvio_padrao_tarifa_efetiva": round(dp_tarifa, 4),
+        },
         "total_ocorrencias_viagens": len(ocorrencias),
         "ocorrencias_por_classificacao": dict(por_classificacao),
         "ocorrencias": ocorrencias,
         "total_desvios_operacionais": len(desvios),
         "desvios_operacionais": desvios,
+    }
+
+def gerar_relatorio_operacional(
+    db: Database,
+    agrupamento: str = "diario",
+    data_inicio: Optional[str] = None,
+    data_fim: Optional[str] = None,
+    linha: Optional[str] = None,
+    tolerancia_desvio_km_pct: float = 15.0,
+    limiar_fcv: float = 0.98,
+    limiar_km_improd_pct: float = 10.0,
+) -> Dict[str, Any]:
+    resumo = obter_resumo_dashboard(db, data_inicio=data_inicio, data_fim=data_fim, linha=linha)
+    serie = obter_serie_temporal(
+        db, agrupamento=agrupamento, data_inicio=data_inicio, data_fim=data_fim, linha=linha
+    )
+    ranking = obter_ranking_linhas(db, data_inicio=data_inicio, data_fim=data_fim, linha=linha)
+    anomalias = obter_anomalias(
+        db,
+        data_inicio=data_inicio,
+        data_fim=data_fim,
+        linha=linha,
+        tolerancia_desvio_km_pct=tolerancia_desvio_km_pct,
+        limiar_fcv=limiar_fcv,
+        limiar_km_improd_pct=limiar_km_improd_pct,
+    )
+    linha_limpa = linha.strip() if linha and linha.strip() else None
+
+    return {
+        "gerado_em": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "periodo": {
+            "data_inicio": data_inicio,
+            "data_fim": data_fim,
+            "agrupamento": agrupamento,
+            "linha": linha_limpa,
+        },
+        "resumo_operacional": resumo,
+        "estatisticas_historicas": anomalias["estatisticas_historicas"],
+        "serie_temporal": serie,
+        "ranking_linhas": ranking,
+        "anomalias": anomalias,
     }

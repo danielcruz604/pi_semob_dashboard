@@ -1,13 +1,11 @@
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 
-
 class PeriodoFiltroSchema(BaseModel):
     data_inicio: Optional[str] = None
     data_fim: Optional[str] = None
     agrupamento: Optional[str] = None
     linha: Optional[str] = None
-
 
 class FiltrosDisponiveisSchema(BaseModel):
     data_minima: Optional[str] = None
@@ -16,14 +14,12 @@ class FiltrosDisponiveisSchema(BaseModel):
     agrupamentos: List[str]
     classificacoes_ocorrencia: List[str]
 
-
 class QuilometragemKpiSchema(BaseModel):
     km_total: float
     km_produtivo: float
     km_improdutivo: float
     taxa_improdutiva_percentual: float
     media_diaria_km: float
-
 
 class ViagensKpiSchema(BaseModel):
     programadas: int
@@ -32,7 +28,6 @@ class ViagensKpiSchema(BaseModel):
     fcv_medio: float
     por_periodo: Dict[str, Dict[str, float]]
 
-
 class PassageirosKpiSchema(BaseModel):
     pagantes: int
     catraca: int
@@ -40,7 +35,6 @@ class PassageirosKpiSchema(BaseModel):
     nao_pagantes: int
     total_geral: int
     percentual_gratuidade: float
-
 
 class FinanceiroKpiSchema(BaseModel):
     total_vendas: float
@@ -58,7 +52,6 @@ class ResumoOperacionalSchema(BaseModel):
     passageiros: PassageirosKpiSchema
     financeiro: FinanceiroKpiSchema
 
-
 class ItemSerieTemporalSchema(BaseModel):
     referencia: str
     km_total: float
@@ -75,12 +68,10 @@ class ItemSerieTemporalSchema(BaseModel):
     credito_circulante: float
     receita_por_km: float
 
-
 class SerieTemporalResponseSchema(BaseModel):
     periodo: PeriodoFiltroSchema
     total_pontos: int
     serie: List[ItemSerieTemporalSchema]
-
 
 class LinhaRankingSchema(BaseModel):
     linha: str
@@ -88,7 +79,6 @@ class LinhaRankingSchema(BaseModel):
     viagens: int
     media_km_por_viagem: float
     participacao_km_percentual: float
-
 
 class HorarioLinhaSchema(BaseModel):
     data: str
@@ -98,6 +88,15 @@ class HorarioLinhaSchema(BaseModel):
     viagens: Optional[int] = None
     partidas: List[int]
 
+class EstatisticasHistoricasSchema(BaseModel):
+    media_km: float
+    desvio_padrao_km: float
+    media_viagens_realizadas: float
+    desvio_padrao_viagens: float
+    media_fcv: float
+    desvio_padrao_fcv: float
+    media_tarifa_efetiva: float
+    desvio_padrao_tarifa_efetiva: float
 
 class DesvioOperacionalSchema(BaseModel):
     data: str
@@ -105,15 +104,26 @@ class DesvioOperacionalSchema(BaseModel):
     indicador: str
     valor_observado: float
     valor_referencia: float
+    desvio_padrao_referencia: Optional[float] = None
+    z_score: Optional[float] = None
     desvio_percentual: Optional[float] = None
     descricao: str
-
 
 class AnomaliasResponseSchema(BaseModel):
     periodo: PeriodoFiltroSchema
     parametros_tolerancia: Dict[str, float]
+    estatisticas_historicas: EstatisticasHistoricasSchema
     total_ocorrencias_viagens: int
     ocorrencias_por_classificacao: Dict[str, int]
     ocorrencias: List[Dict[str, Any]]
     total_desvios_operacionais: int
     desvios_operacionais: List[DesvioOperacionalSchema]
+
+class RelatorioConsolidadoSchema(BaseModel):
+    gerado_em: str
+    periodo: PeriodoFiltroSchema
+    resumo_operacional: ResumoOperacionalSchema
+    estatisticas_historicas: EstatisticasHistoricasSchema
+    serie_temporal: SerieTemporalResponseSchema
+    ranking_linhas: List[LinhaRankingSchema]
+    anomalias: AnomaliasResponseSchema
