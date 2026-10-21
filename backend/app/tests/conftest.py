@@ -19,6 +19,9 @@ def _ajustar_sys_path():
             sys.path.insert(0, str(pasta))
 
 _ajustar_sys_path()
+os.environ.setdefault("MONGO_URI", "mongodb://localhost:27017")
+os.environ.setdefault("DATABASE_NAME", "semob_teste")
+os.environ.setdefault("JWT_SECRET", "semob_dev_test_secret_key_fallback_32bytes")
 import amostras_html as A
 
 def _compatibilizar_mongomock() -> None:

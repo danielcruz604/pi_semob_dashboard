@@ -21,12 +21,18 @@ class QuilometragemKpiSchema(BaseModel):
     taxa_improdutiva_percentual: float
     media_diaria_km: float
 
+class TurnoFcvKpiSchema(BaseModel):
+    prog: int
+    real: int
+    fcv: float
+
+
 class ViagensKpiSchema(BaseModel):
     programadas: int
     realizadas: int
     diferenca: int
     fcv_medio: float
-    por_periodo: Dict[str, Dict[str, float]]
+    por_periodo: Dict[str, TurnoFcvKpiSchema]
 
 class PassageirosKpiSchema(BaseModel):
     pagantes: int
@@ -43,7 +49,6 @@ class FinanceiroKpiSchema(BaseModel):
     credito_circulante_acumulado: float
     saldo_final_recente: Optional[float] = None
     receita_por_km: float
-
 
 class ResumoOperacionalSchema(BaseModel):
     periodo: PeriodoFiltroSchema
@@ -127,3 +132,20 @@ class RelatorioConsolidadoSchema(BaseModel):
     serie_temporal: SerieTemporalResponseSchema
     ranking_linhas: List[LinhaRankingSchema]
     anomalias: AnomaliasResponseSchema
+
+class ResultadoArquivoLoteSchema(BaseModel):
+    arquivo: str
+    status: str
+    tipo_relatorio: Optional[str] = None
+    colecao: Optional[str] = None
+    total_registros_validos: int = 0
+    documentos_afetados: Optional[int] = None
+    detalhe_erro: Optional[str] = None
+
+class RelatorioUploadIntegradoSchema(BaseModel):
+    total_arquivos_recebidos: int
+    total_arquivos_persistidos: int
+    total_arquivos_apenas_processados: int
+    total_arquivos_com_erro: int
+    arquivos: List[ResultadoArquivoLoteSchema]
+    relatorio: RelatorioConsolidadoSchema

@@ -6,7 +6,13 @@ from app.utils.token_config import criar_token_jwt
 
 class UsuarioController:
     def __init__(self):
-        self.dao = UsuarioDAO()
+        self._dao = None
+
+    @property
+    def dao(self) -> UsuarioDAO:
+        if self._dao is None:
+            self._dao = UsuarioDAO()
+        return self._dao
 
     def registrar_usuario(self, dados: UsuarioCreate) -> UsuarioResponse:
         if self.dao.buscar_por_email(dados.email):
@@ -22,7 +28,6 @@ class UsuarioController:
             "papel": dados.papel
         }
 
-        
         id_inserido = self.dao.inserir(novo_usuario)
 
         return UsuarioResponse(

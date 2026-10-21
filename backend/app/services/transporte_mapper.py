@@ -22,15 +22,6 @@ def _to_str(valor: Any, default: Optional[str] = "") -> Optional[str]:
     #Texto limpo; None/NaN/vazio retornam `default` (nunca a string 'None').
     return default if _vazio(valor) else str(valor).strip()
 
-def _to_int(valor: Any, default: Optional[int] = 0) -> Optional[int]:
-    if _vazio(valor):
-        return default
-    try:
-        numero = float(valor)
-    except (ValueError, TypeError):
-        return default
-    return int(numero) if math.isfinite(numero) else default
-
 def _to_float(valor: Any) -> Optional[float]:
     if _vazio(valor):
         return None
@@ -39,6 +30,10 @@ def _to_float(valor: Any) -> Optional[float]:
     except (ValueError, TypeError):
         return None
     return numero if math.isfinite(numero) else None
+
+def _to_int(valor: Any, default: Optional[int] = 0) -> Optional[int]:
+    numero = _to_float(valor)
+    return default if numero is None else int(numero)
 
 def _sem_none(d: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in d.items() if v is not None}
@@ -231,7 +226,7 @@ def mapear_viagens_ocorrencias(
     return documentos
 
 def mapear_passageiros_sistema(dados_passageiros: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Passageiros_Mensal.html -> passegeirosSistema."""
+    """Passageiros_Mensal.html -> passageirosSistema."""
     documentos = []
     for item in dados_passageiros:
         dt = _resolver_data(item)

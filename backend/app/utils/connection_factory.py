@@ -1,11 +1,13 @@
 import os
+from pathlib import Path
 import threading
 from typing import Optional
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from pymongo.database import Database
 
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+load_dotenv(dotenv_path=BASE_DIR / ".env")
 
 class ConnectionFactory:
     _instance: Optional["ConnectionFactory"] = None

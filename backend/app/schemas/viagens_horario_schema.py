@@ -1,14 +1,18 @@
-from pydantic import BaseModel
-from datetime import date
-from typing import List
+from datetime import datetime
+from typing import List, Optional
+from pydantic import BaseModel, ConfigDict, Field
+
 
 class ViagensHorarioCreate(BaseModel):
-    data: date
+    model_config = ConfigDict(extra="forbid")
+
+    data: datetime
     linha: str
     hora: int
-    nrVeiculos: int
-    nrViagens: int
-    partidas: List[int]
+    nrVeiculos: Optional[int] = None
+    nrViagens: Optional[int] = None
+    partidas: Optional[List[int]] = None
+
 
 class ViagensHorarioResponse(ViagensHorarioCreate):
-    id: str
+    id: Optional[str] = Field(default=None, alias="_id")

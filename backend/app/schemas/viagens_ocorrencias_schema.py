@@ -1,23 +1,28 @@
-from pydantic import BaseModel
-from datetime import date, datetime
+from datetime import datetime
+from typing import Optional
+from pydantic import BaseModel, ConfigDict, Field
+
 
 class ViagensOcorrenciasCreate(BaseModel):
-    data: date
+    model_config = ConfigDict(extra="forbid")
+
+    data: datetime
     classificacao: str
     linha: str
-    atendimento: str
-    prefixo: int
-    atividade: str
-    motorista: int
-    sentido: str
-    tabela: str
-    statusSaida: str
-    statusChegada: str
+    atendimento: Optional[str] = None
+    prefixo: Optional[int] = None
+    atividade: Optional[str] = None
+    motorista: Optional[int] = None
+    sentido: Optional[str] = None
+    tabela: Optional[str] = None
+    statusSaida: Optional[str] = None
+    statusChegada: Optional[str] = None
     inicioProgramado: datetime
-    inicioRealizado: datetime
-    fimProgramado: datetime
-    fimRealizado: datetime
-    kmProd: float
+    inicioRealizado: Optional[datetime] = None
+    fimProgramado: Optional[datetime] = None
+    fimRealizado: Optional[datetime] = None
+    kmProd: Optional[float] = None
+
 
 class ViagensOcorrenciasResponse(ViagensOcorrenciasCreate):
-    id: str
+    id: Optional[str] = Field(default=None, alias="_id")

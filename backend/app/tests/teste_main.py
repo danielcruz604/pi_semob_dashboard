@@ -36,8 +36,21 @@ def teste_metadados_do_app():
     assert main.app.version == "1.0.0"
 
 def teste_rotas_ficam_sob_o_prefixo_api(client):
-    caminhos = client.get("/openapi.json").json()["paths"]
-    assert set(caminhos) == {"/api/transporte/processar-html", "/api/transporte/processar-e-salvar"}
+    caminhos = set(client.get("/openapi.json").json()["paths"]) - {"/"}
+    rotas_esperadas = {
+        "/api/transporte/processar-html",
+        "/api/transporte/processar-e-salvar",
+        "/api/dashboard/resumo-operacional",
+        "/api/dashboard/serie-temporal",
+        "/api/dashboard/anomalias",
+        "/api/dashboard/relatorio",
+        "/api/dashboard/relatorio/upload-e-gerar",
+        "/api/v1/relatorios/upload",
+        "/api/v1/dashboard/metricas",
+    }
+    assert rotas_esperadas <= caminhos
+    assert all(c.startswith("/api/") for c in caminhos)
+
 
 def teste_arquivo_invalido_retorna_400(client):
     resposta = client.post(URL, files={"file": ("invalido.txt", b"teste", "text/plain")})
@@ -63,7 +76,7 @@ def teste_startup_cria_indices_e_shutdown_fecha_a_conexao(monkeypatch, fabrica_f
     monkeypatch.setattr(main, "garantir_indices", lambda db: chamadas.append(db))
     with TestClient(main.app) as cliente:
         assert chamadas == ["banco-falso"]
-        assert all(f.fechada == 0 for f in fabrica_falsa.instancias)       # ainda aberta durante a execução
+        assert all(f.fechada == 0 for f in fabrica_falsa.instancias)
         assert cliente.get("/openapi.json").status_code == 200
     assert any(f.fechada == 1 for f in fabrica_falsa.instancias)
 
@@ -79,29 +92,22 @@ def teste_startup_cria_os_indices_unicos_no_banco_em_memoria(conexao_mock):
 def teste_falha_ao_criar_indices_nao_derruba_o_app_e_e_registrada(monkeypatch, fabrica_falsa, caplog, excecao):
     def falhar(db):
         raise excecao
-
     monkeypatch.setattr(main, "garantir_indices", falhar)
     with caplog.at_level(logging.ERROR, logger=main.logger.name):
         with TestClient(main.app) as cliente:
-            assert cliente.get("/openapi.json").status_code == 200           # o app sobe normalmente
+            assert cliente.get("/openapi.json").status_code == 200
     assert "Não foi possível garantir os índices" in caplog.text
-    assert any(f.fechada == 1 for f in fabrica_falsa.instancias)             # e ainda fecha a conexão
+    assert any(f.fechada == 1 for f in fabrica_falsa.instancias)
 
 def teste_startup_sem_variaveis_de_ambiente_apenas_registra_o_erro(factory_limpa, sem_env_mongo, caplog):
     with caplog.at_level(logging.ERROR, logger=main.logger.name):
         with TestClient(main.app) as cliente:
             resposta = cliente.post(URL, files={"file": ("Mensal_Linhas_202608.html", A.AMOSTRAS["linhas"].conteudo, "text/html")})
-            assert resposta.status_code == 200                              # rotas sem banco continuam funcionando
+            assert resposta.status_code == 200
     assert "Não foi possível garantir os índices" in caplog.text
 
 def teste_exception_nao_tratada_no_startup_nao_e_engolida(monkeypatch, fabrica_falsa):
-    #apenas PyMongoError/RuntimeError são tolerados; bugs de programação devem aparecer
     monkeypatch.setattr(main, "garantir_indices", lambda db: (_ for _ in ()).throw(KeyError("bug")))
     with pytest.raises(KeyError):
         with TestClient(main.app):
             pass
-
-def teste_rotas_ficam_sob_o_prefixo_api(client):
-    caminhos = client.get("/openapi.json").json()["paths"]
-    assert {"/api/transporte/processar-html", "/api/transporte/processar-e-salvar"} <= set(caminhos)
-    assert all(c.startswith("/api/") for c in caminhos)

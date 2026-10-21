@@ -1,13 +1,15 @@
 import logging
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from pymongo.errors import PyMongoError
+from app.routes.transporte_route import _ler_upload_html
 from app.schemas.dashboard_schema import (
     AnomaliasResponseSchema,
     FiltrosDisponiveisSchema,
     HorarioLinhaSchema,
     LinhaRankingSchema,
     RelatorioConsolidadoSchema,
+    RelatorioUploadIntegradoSchema,
     ResumoOperacionalSchema,
     SerieTemporalResponseSchema,
 )
@@ -19,6 +21,7 @@ from app.services.dashboard_service import (
     obter_ranking_linhas,
     obter_resumo_dashboard,
     obter_serie_temporal,
+    processar_arquivos_e_gerar_relatorio,
 )
 from app.utils.connection_factory import ConnectionFactory
 
@@ -44,6 +47,7 @@ def listar_filtros_disponiveis():
     return _executar_consulta(obter_filtros_disponiveis)
 
 @router.get("/resumo-operacional", response_model=ResumoOperacionalSchema)
+@router.get("/metricas", response_model=ResumoOperacionalSchema)
 def resumo_operacional(
     data_inicio: Optional[str] = Query(None, description="Data inicial (YYYY-MM-DD)"),
     data_fim: Optional[str] = Query(None, description="Data final (YYYY-MM-DD)"),
@@ -122,6 +126,30 @@ def relatorio_consolidado(
 ):
     return _executar_consulta(
         gerar_relatorio_operacional,
+        agrupamento=agrupamento,
+        data_inicio=data_inicio,
+        data_fim=data_fim,
+        linha=linha,
+        tolerancia_desvio_km_pct=tolerancia_desvio_km_pct,
+        limiar_fcv=limiar_fcv,
+        limiar_km_improd_pct=limiar_km_improd_pct,
+    )
+
+@router.post("/relatorio/upload-e-gerar", response_model=RelatorioUploadIntegradoSchema)
+def upload_lote_e_gerar_relatorio(
+    files: List[UploadFile] = File(..., description="Um ou mais arquivos .html/.htm da SEMOB"),
+    agrupamento: str = Query("diario", description="diario, semanal ou mensal"),
+    data_inicio: Optional[str] = Query(None, description="Data inicial (YYYY-MM-DD)"),
+    data_fim: Optional[str] = Query(None, description="Data final (YYYY-MM-DD)"),
+    linha: Optional[str] = Query(None, description="Código da linha (ex.: 01)"),
+    tolerancia_desvio_km_pct: float = Query(15.0, ge=0.0, description="Tolerância (%) de desvio da média de km"),
+    limiar_fcv: float = Query(0.98, ge=0.0, le=1.0, description="Alerta para FCV abaixo deste valor"),
+    limiar_km_improd_pct: float = Query(10.0, ge=0.0, description="Alerta para % de km improdutivo acima deste valor"),
+):
+    arquivos_lidos = [_ler_upload_html(f) for f in files]
+    return _executar_consulta(
+        processar_arquivos_e_gerar_relatorio,
+        arquivos=arquivos_lidos,
         agrupamento=agrupamento,
         data_inicio=data_inicio,
         data_fim=data_fim,

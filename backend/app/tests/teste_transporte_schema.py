@@ -91,3 +91,44 @@ def teste_saida_do_servico_de_persistencia_valida_no_schema(db, chave):
     r = _validar(RespostaProcessamentoEPersistenciaSchema, resultado)
     assert r.persistencia.colecao == amostra.colecao
     assert r.persistencia.documentos_afetados == amostra.afetados
+
+
+def teste_schemas_canonicos_das_colecoes_rejeitam_snake_case_indevido():
+    from datetime import datetime
+    from app.services.transporte_repository import (
+        COL_FINANCEIRO_SISTEMA,
+        COL_PASSAGEIROS_SISTEMA,
+        COL_VIAGENS_HORARIO,
+        COL_VIAGENS_LINHAS,
+        COL_VIAGENS_OCORRENCIAS,
+        COL_VIAGENS_SISTEMA,
+        validar_documento_colecao,
+    )
+
+    dt = datetime(2026, 8, 1)
+    assert validar_documento_colecao(COL_VIAGENS_SISTEMA, {"data": dt, "kmTotal": 100.5}) == {
+        "data": dt,
+        "kmTotal": 100.5,
+    }
+    assert validar_documento_colecao(COL_VIAGENS_LINHAS, {"data": dt, "linha": "01", "nrViagens": 10}) == {
+        "data": dt,
+        "linha": "01",
+        "nrViagens": 10,
+    }
+    assert validar_documento_colecao(COL_VIAGENS_HORARIO, {"data": dt, "linha": "01", "hora": 5, "partidas": [10, 20]}) == {
+        "data": dt,
+        "linha": "01",
+        "hora": 5,
+        "partidas": [10, 20],
+    }
+    assert validar_documento_colecao(
+        COL_VIAGENS_OCORRENCIAS,
+        {"data": dt, "linha": "01", "classificacao": "NaoRealizada", "inicioProgramado": dt},
+    )["classificacao"] == "NaoRealizada"
+    assert validar_documento_colecao(COL_PASSAGEIROS_SISTEMA, {"data": dt, "catraca": 50})["catraca"] == 50
+    assert validar_documento_colecao(COL_FINANCEIRO_SISTEMA, {"data": dt, "totalVendas": 200.0})["totalVendas"] == 200.0
+
+    with pytest.raises(ValidationError):
+        validar_documento_colecao(COL_VIAGENS_SISTEMA, {"data": dt, "km_total": 100.5})
+    with pytest.raises(ValidationError):
+        validar_documento_colecao(COL_FINANCEIRO_SISTEMA, {"data": dt, "total_vendas": 200.0})

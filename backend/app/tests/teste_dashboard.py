@@ -122,13 +122,49 @@ def teste_integracao_geracao_relatorio_consolidado_get_e_post(client, conexao_mo
     assert r_post.status_code == 200
     assert r_post.json()["periodo"]["linha"] == "01"
 
+    r_v1 = client.get("/api/v1/dashboard/relatorio", params={"agrupamento": "semanal"})
+    assert r_v1.status_code == 200
+    assert r_v1.json()["periodo"]["agrupamento"] == "semanal"
+
+def teste_upload_lote_e_gerar_relatorio_integrado(client, conexao_mock):
+    arquivos_multipart = [
+        ("files", (A.AMOSTRAS["resumo"].arquivo, A.AMOSTRAS["resumo"].conteudo, "text/html")),
+        ("files", (A.AMOSTRAS["fcv"].arquivo, A.AMOSTRAS["fcv"].conteudo, "text/html")),
+        ("files", (A.AMOSTRAS["linhas"].arquivo, A.AMOSTRAS["linhas"].conteudo, "text/html")),
+        ("files", (A.AMOSTRAS["passageiros"].arquivo, A.AMOSTRAS["passageiros"].conteudo, "text/html")),
+        ("files", (A.AMOSTRAS["saldos"].arquivo, A.AMOSTRAS["saldos"].conteudo, "text/html")),
+        ("files", (A.AMOSTRAS_SEM_COLECAO["viagens"].arquivo, A.AMOSTRAS_SEM_COLECAO["viagens"].conteudo, "text/html")),
+    ]
+    r = client.post("/api/dashboard/relatorio/upload-e-gerar", files=arquivos_multipart)
+    assert r.status_code == 200
+    corpo = r.json()
+    assert corpo["total_arquivos_recebidos"] == 6
+    assert corpo["total_arquivos_persistidos"] == 5
+    assert corpo["total_arquivos_apenas_processados"] == 1
+    assert corpo["total_arquivos_com_erro"] == 0
+    assert corpo["relatorio"]["resumo_operacional"]["quilometragem"]["km_total"] == pytest.approx(19884.45)
+
+def teste_upload_lote_contabiliza_arquivo_sem_tabelas_como_erro_sem_interromper_lote(client, conexao_mock):
+    arquivos_multipart = [
+        ("files", (A.AMOSTRAS["resumo"].arquivo, A.AMOSTRAS["resumo"].conteudo, "text/html")),
+        ("files", ("Mensal_Invalido_202608.html", A.HTML_SEM_TABELAS, "text/html")),
+    ]
+    r = client.post("/api/v1/dashboard/relatorio/upload-e-gerar", files=arquivos_multipart)
+    assert r.status_code == 200
+    corpo = r.json()
+    assert corpo["total_arquivos_recebidos"] == 2
+    assert corpo["total_arquivos_persistidos"] == 1
+    assert corpo["total_arquivos_com_erro"] == 1
+    assert corpo["arquivos"][1]["status"] == "erro"
+
 @pytest.mark.parametrize("params", [
     {"data_inicio": "data-invalida"},
     {"data_fim": "2026/08/01"},
     {"data_inicio": "2026-08-10", "data_fim": "2026-08-01"},
+    {"agrupamento": "anual"},
 ])
 def teste_filtros_de_data_invalidos_retornam_400(client, conexao_mock, params):
-    assert client.get("/api/dashboard/resumo-operacional", params=params).status_code == 400
+    assert client.get("/api/dashboard/relatorio", params=params).status_code == 400
 
 def teste_falha_de_banco_no_dashboard_retorna_503_sem_vazar_segredo(client, monkeypatch):
     def falhar(*args, **kwargs):

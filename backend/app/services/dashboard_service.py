@@ -1,8 +1,9 @@
 import math
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from pymongo.database import Database
+from app.services.transporte_mapper import _calcular_fcv
 from app.services.transporte_repository import (
     COL_FINANCEIRO_SISTEMA,
     COL_PASSAGEIROS_SISTEMA,
@@ -10,6 +11,10 @@ from app.services.transporte_repository import (
     COL_VIAGENS_LINHAS,
     COL_VIAGENS_OCORRENCIAS,
     COL_VIAGENS_SISTEMA,
+)
+from app.services.transporte_service import (
+    processar_e_persistir_html_bytes,
+    processar_html_bytes,
 )
 
 AGRUPAMENTOS_VALIDOS = {"diario", "semanal", "mensal"}
@@ -58,8 +63,8 @@ def _chave_periodo(dt: datetime, agrupamento: str) -> str:
     return dt.strftime("%Y-%m-%d")
 
 def _calcular_pagantes(doc: Dict[str, Any]) -> int:
-    if doc.get("pagantes") is not None:
-        return int(doc["pagantes"])
+    # Em conformidade estrita com `passageirosSistema` (catraca + antecipados)
+
     return int(doc.get("catraca") or 0) + int(doc.get("antecipados") or 0)
 
 def obter_filtros_disponiveis(db: Database) -> Dict[str, Any]:
@@ -99,7 +104,7 @@ def obter_resumo_dashboard(
     filtro = montar_filtro_data(data_inicio, data_fim)
     linha_limpa = linha.strip() if linha and linha.strip() else None
 
-    docs_viagens = list(db[COL_VIAGENS_SISTEMA].find(filtro, {"_id": 0}))
+    docs_viagens: List[Dict[str, Any]] = []
     docs_pass = list(db[COL_PASSAGEIROS_SISTEMA].find(filtro, {"_id": 0}))
     docs_fin = list(db[COL_FINANCEIRO_SISTEMA].find(filtro, {"_id": 0}).sort("data", -1))
 
@@ -119,6 +124,7 @@ def obter_resumo_dashboard(
             p: {"prog": 0, "real": 0, "fcv": 0.0} for p in ("manha", "tarde", "noite")
         }
     else:
+        docs_viagens = list(db[COL_VIAGENS_SISTEMA].find(filtro, {"_id": 0}))
         km_total = sum(float(d.get("kmTotal") or 0.0) for d in docs_viagens)
         km_prod = sum(float(d.get("kmProdTotal") or 0.0) for d in docs_viagens)
         km_improd = sum(float(d.get("kmImprodTotal") or 0.0) for d in docs_viagens)
@@ -128,7 +134,7 @@ def obter_resumo_dashboard(
 
         prog = sum(int(d.get("nrViagensProg") or 0) for d in docs_viagens)
         real = sum(int(d.get("nrTotalViagensRealizadas") or 0) for d in docs_viagens)
-        fcv_medio = round(real / prog, 4) if prog > 0 else 0.0
+        fcv_medio = _calcular_fcv(real, prog)
 
         periodos_acum = {}
         for p in ("manha", "tarde", "noite"):
@@ -137,7 +143,7 @@ def obter_resumo_dashboard(
             periodos_acum[p] = {
                 "prog": p_prog,
                 "real": p_real,
-                "fcv": round(p_real / p_prog, 4) if p_prog > 0 else 0.0,
+                "fcv": _calcular_fcv(p_real, p_prog),
             }
 
     catraca = sum(int(d.get("catraca") or 0) for d in docs_pass)
@@ -260,7 +266,7 @@ def obter_serie_temporal(
             "km_improdutivo": round(g["km_improdutivo"], 2),
             "viagens_programadas": prog,
             "viagens_realizadas": real,
-            "fcv": round(real / prog, 4) if prog > 0 else 0.0,
+            "fcv": _calcular_fcv(real, prog),
             "passageiros_pagantes": int(g["passageiros_pagantes"]),
             "passageiros_nao_pagantes": int(g["passageiros_nao_pagantes"]),
             "total_passageiros": int(g["total_passageiros"]),
@@ -373,6 +379,13 @@ def obter_anomalias(
         por_classificacao[cls] += 1
         ocorrencias.append(item)
 
+    if filtro_oc != filtro:
+        ocorrencias_por_dia.clear()
+        for doc_global in db[COL_VIAGENS_OCORRENCIAS].find(filtro, {"data": 1, "_id": 0}):
+            dt_global = doc_global.get("data")
+            if isinstance(dt_global, datetime):
+                ocorrencias_por_dia[dt_global.strftime("%Y-%m-%d")] += 1
+
     docs_viagens = list(db[COL_VIAGENS_SISTEMA].find(filtro, {"_id": 0}).sort("data", 1))
     kms_validos = [float(d["kmTotal"]) for d in docs_viagens if (d.get("kmTotal") or 0) > 0]
     viagens_validas = [
@@ -414,7 +427,7 @@ def obter_anomalias(
                     ),
                 })
 
-        #FCV abaixo da meta
+        # Regra 2: FCV abaixo da meta
         fcv = d.get("fcvTotal")
         if fcv is not None and float(fcv) < limiar_fcv:
             fcv_val = float(fcv)
@@ -568,6 +581,7 @@ def obter_anomalias(
         "desvios_operacionais": desvios,
     }
 
+
 def gerar_relatorio_operacional(
     db: Database,
     agrupamento: str = "diario",
@@ -607,4 +621,94 @@ def gerar_relatorio_operacional(
         "serie_temporal": serie,
         "ranking_linhas": ranking,
         "anomalias": anomalias,
+    }
+
+def processar_arquivos_e_gerar_relatorio(
+    db: Database,
+    arquivos: Sequence[Tuple[bytes, str]],
+    agrupamento: str = "diario",
+    data_inicio: Optional[str] = None,
+    data_fim: Optional[str] = None,
+    linha: Optional[str] = None,
+    tolerancia_desvio_km_pct: float = 15.0,
+    limiar_fcv: float = 0.98,
+    limiar_km_improd_pct: float = 10.0,
+) -> Dict[str, Any]:
+    if not arquivos:
+        raise ValueError("Envie pelo menos um arquivo .html ou .htm.")
+
+    resultados_arquivos: List[Dict[str, Any]] = []
+    persistidos = 0
+    apenas_processados = 0
+    com_erro = 0
+
+    for conteudo, nome_arquivo in arquivos:
+        try:
+            res = processar_e_persistir_html_bytes(conteudo, nome_arquivo=nome_arquivo, db=db)
+            persistidos += 1
+            resultados_arquivos.append({
+                "arquivo": nome_arquivo,
+                "status": "persistido",
+                "tipo_relatorio": res["metadados"].get("tipo_relatorio"),
+                "colecao": res["persistencia"]["colecao"],
+                "total_registros_validos": res["total_registros_validos"],
+                "documentos_afetados": res["persistencia"]["documentos_afetados"],
+                "detalhe_erro": None,
+            })
+        except ValueError as exc:
+            msg = str(exc)
+            if "sem coleção de destino definida" in msg or "não possui mapeamento de persistência" in msg:
+                try:
+                    res_proc = processar_html_bytes(conteudo, nome_arquivo=nome_arquivo)
+                    apenas_processados += 1
+                    resultados_arquivos.append({
+                        "arquivo": nome_arquivo,
+                        "status": "apenas_processado",
+                        "tipo_relatorio": res_proc["metadados"].get("tipo_relatorio"),
+                        "colecao": None,
+                        "total_registros_validos": res_proc["total_registros_validos"],
+                        "documentos_afetados": 0,
+                        "detalhe_erro": None,
+                    })
+                except ValueError as inner_exc:
+                    com_erro += 1
+                    resultados_arquivos.append({
+                        "arquivo": nome_arquivo,
+                        "status": "erro",
+                        "tipo_relatorio": None,
+                        "colecao": None,
+                        "total_registros_validos": 0,
+                        "documentos_afetados": None,
+                        "detalhe_erro": str(inner_exc),
+                    })
+            else:
+                com_erro += 1
+                resultados_arquivos.append({
+                    "arquivo": nome_arquivo,
+                    "status": "erro",
+                    "tipo_relatorio": None,
+                    "colecao": None,
+                    "total_registros_validos": 0,
+                    "documentos_afetados": None,
+                    "detalhe_erro": msg,
+                })
+
+    relatorio = gerar_relatorio_operacional(
+        db,
+        agrupamento=agrupamento,
+        data_inicio=data_inicio,
+        data_fim=data_fim,
+        linha=linha,
+        tolerancia_desvio_km_pct=tolerancia_desvio_km_pct,
+        limiar_fcv=limiar_fcv,
+        limiar_km_improd_pct=limiar_km_improd_pct,
+    )
+
+    return {
+        "total_arquivos_recebidos": len(arquivos),
+        "total_arquivos_persistidos": persistidos,
+        "total_arquivos_apenas_processados": apenas_processados,
+        "total_arquivos_com_erro": com_erro,
+        "arquivos": resultados_arquivos,
+        "relatorio": relatorio,
     }
