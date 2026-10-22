@@ -1,7 +1,14 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'dashboard_page.dart';
-import 'relatorio_api_service.dart';
+import 'sessao_service.dart';
 
+/// Conta de demonstração exibida nos atalhos de acesso rápido.
+///
+/// Os atalhos apenas preenchem o formulário: a autenticação é sempre feita pelo
+/// backend. As contas precisam existir no banco (veja
+/// `backend/scripts/criar_usuarios_demo.py`) e os atalhos só aparecem em modo
+/// debug.
 class UsuarioCadastrado {
   final String nome;
   final String email;
@@ -19,7 +26,10 @@ class UsuarioCadastrado {
 }
 
 class LoginPage extends StatefulWidget {
-  const LoginPage({super.key});
+  /// Mensagem opcional exibida ao abrir a tela (ex.: sessão expirada).
+  final String? mensagemInicial;
+
+  const LoginPage({super.key, this.mensagemInicial});
 
   @override
   State<LoginPage> createState() => _LoginPageState();
@@ -35,8 +45,14 @@ class _LoginPageState extends State<LoginPage> {
   bool _autenticando = false;
   String? _mensagemErro;
 
-  /// Base de dados pré-cadastrada da SEMOB
-  static const List<UsuarioCadastrado> _bancoDeUsuarios = [
+  @override
+  void initState() {
+    super.initState();
+    _mensagemErro = widget.mensagemInicial;
+  }
+
+  /// Contas de demonstração (precisam estar cadastradas no backend)
+  static const List<UsuarioCadastrado> _contasDemonstracao = [
     UsuarioCadastrado(
       nome: 'Diretoria Geral',
       email: 'gestor@semob.sp.gov.br',
@@ -76,45 +92,27 @@ class _LoginPageState extends State<LoginPage> {
       _mensagemErro = null;
     });
 
-    await Future.delayed(const Duration(milliseconds: 500));
-
-    final emailDigitado = _emailController.text.trim().toLowerCase();
-    final senhaDigitada = _senhaController.text.trim();
-
-    bool autenticadoViaApi = false;
-    String? erroApiCredenciais;
     try {
-      await RelatorioApiService.autenticarUsuario(
-        email: emailDigitado,
-        senha: senhaDigitada,
+      await SessaoService.entrar(
+        email: _emailController.text.trim().toLowerCase(),
+        senha: _senhaController.text.trim(),
+        lembrar: _lembrarMe,
       );
-      autenticadoViaApi = true;
-    } on RelatorioApiException catch (e) {
-      if (e.statusCode == 401) {
-        erroApiCredenciais = e.message;
-      }
-    } catch (_) {}
-
-    final usuarioEncontrado = _bancoDeUsuarios.cast<UsuarioCadastrado?>().firstWhere(
-          (u) => u?.email.toLowerCase() == emailDigitado && u?.senha == senhaDigitada,
-          orElse: () => null,
-        );
-
-    if (!mounted) return;
-
-    if (autenticadoViaApi || usuarioEncontrado != null) {
-      setState(() => _autenticando = false);
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const DashboardPage()),
-      );
-    } else {
+    } catch (erro) {
+      if (!mounted) return;
       setState(() {
         _autenticando = false;
-        _mensagemErro =
-            erroApiCredenciais ?? 'E-mail ou senha incorretos. Utilize uma credencial válida.';
+        _mensagemErro = SessaoService.mensagemDeErro(erro);
       });
+      return;
     }
+
+    if (!mounted) return;
+    setState(() => _autenticando = false);
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => const DashboardPage()),
+    );
   }
 
   @override
@@ -336,29 +334,31 @@ class _LoginPageState extends State<LoginPage> {
                             : const Text('Acessar Painel Operacional', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
                       ),
 
-                      const SizedBox(height: 24),
-                      const Divider(height: 1, color: Color(0xFFE2E8F0)),
-                      const SizedBox(height: 18),
+                      if (kDebugMode) ...[
+                        const SizedBox(height: 24),
+                        const Divider(height: 1, color: Color(0xFFE2E8F0)),
+                        const SizedBox(height: 18),
 
-                      // Atalhos Rápidos para Demonstração / TV
-                      const Text(
-                        'Acesso Rápido para Apresentação / Demonstração:',
-                        style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.blueGrey),
-                      ),
-                      const SizedBox(height: 10),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: _bancoDeUsuarios.map((user) {
-                          return ActionChip(
-                            avatar: Icon(user.icone, size: 15, color: const Color(0xFF0284C7)),
-                            label: Text('${user.nome} (${user.cargo})', style: const TextStyle(fontSize: 11)),
-                            backgroundColor: const Color(0xFFF1F5F9),
-                            side: const BorderSide(color: Color(0xFFCBD5E1)),
-                            onPressed: () => _preencherCredenciaisRapidas(user),
-                          );
-                        }).toList(),
-                      ),
+                        // Atalhos Rápidos para Demonstração / TV
+                        const Text(
+                          'Acesso Rápido para Apresentação / Demonstração:',
+                          style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.blueGrey),
+                        ),
+                        const SizedBox(height: 10),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: _contasDemonstracao.map((user) {
+                            return ActionChip(
+                              avatar: Icon(user.icone, size: 15, color: const Color(0xFF0284C7)),
+                              label: Text('${user.nome} (${user.cargo})', style: const TextStyle(fontSize: 11)),
+                              backgroundColor: const Color(0xFFF1F5F9),
+                              side: const BorderSide(color: Color(0xFFCBD5E1)),
+                              onPressed: () => _preencherCredenciaisRapidas(user),
+                            );
+                          }).toList(),
+                        ),
+                      ],
                     ],
                   ),
                 ),

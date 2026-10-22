@@ -5,6 +5,7 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'local_data_loader.dart';
 import 'login_page.dart';
+import 'sessao_service.dart';
 
 enum ModoAnalise { extratoPeriodo, compararDiasSemana }
 
@@ -367,8 +368,14 @@ class _DashboardPageState extends State<DashboardPage> {
     return _ultimoRelatorioTexto ?? RelatorioApiService.formatarResumoRelatorio(relatorio);
   }
 
-  void _sairParaTelaDeLogin() {
-    RelatorioApiService.limparSessao();
+  String? get _nomeUsuarioLogado {
+    final nome = RelatorioApiService.usuarioLogado?['nome']?.toString().trim();
+    return (nome == null || nome.isEmpty) ? null : nome;
+  }
+
+  Future<void> _sairParaTelaDeLogin() async {
+    await SessaoService.sair();
+    if (!mounted) return;
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(builder: (_) => const LoginPage()),
@@ -462,8 +469,29 @@ class _DashboardPageState extends State<DashboardPage> {
               label: const Text('HTMLs', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
             ),
           ),
+          if (_nomeUsuarioLogado != null && MediaQuery.of(context).size.width >= 720)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6.0),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.account_circle_rounded, color: Color(0xFF38BDF8), size: 18),
+                  const SizedBox(width: 6),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 160),
+                    child: Text(
+                      _nomeUsuarioLogado!,
+                      style: const TextStyle(fontSize: 12, color: Colors.white70),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           IconButton(
-            tooltip: 'Sair / Trocar Operador',
+            tooltip: _nomeUsuarioLogado == null
+                ? 'Sair / Trocar Operador'
+                : 'Sair ($_nomeUsuarioLogado)',
             icon: const Icon(Icons.logout_rounded, color: Colors.white70, size: 20),
             onPressed: _sairParaTelaDeLogin,
           ),
