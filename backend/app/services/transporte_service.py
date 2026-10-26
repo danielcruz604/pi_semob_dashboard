@@ -21,6 +21,7 @@ from app.services.transporte_repository import (
     COL_VIAGENS_LINHAS,
     COL_VIAGENS_OCORRENCIAS,
     COL_VIAGENS_SISTEMA,
+    detectar_discrepancias_pre_upsert,
     upsert_financeiro_sistema,
     upsert_passageiros_sistema,
     upsert_viagens_horario,
@@ -139,7 +140,10 @@ _SEM_COLECAO = {
 }
 
 def _persistir(
-    db: Database, tipo: str, conjuntos: List[Dict[str, Any]]
+    db: Database,
+    tipo: str,
+    conjuntos: List[Dict[str, Any]],
+    discrepancias_out: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[str, int, Optional[int]]:
     #Despacha para o mapper/repositório corretos. Retorna (coleção, afetados, descartados).
     categoria = _classificar_relatorio(tipo)
@@ -161,28 +165,40 @@ def _persistir(
         if creditos is None and movimentacoes is None:
             raise ValueError("Relatório de saldos sem tabelas de créditos ou movimentações reconhecidas.")
         docs = mapear_financeiro_sistema(creditos, movimentacoes)
+        if discrepancias_out is not None:
+            discrepancias_out.extend(detectar_discrepancias_pre_upsert(db, COL_FINANCEIRO_SISTEMA, docs))
         return COL_FINANCEIRO_SISTEMA, upsert_financeiro_sistema(db, docs), None
 
     if categoria == "passageiros":
         docs = mapear_passageiros_sistema(dados)
+        if discrepancias_out is not None:
+            discrepancias_out.extend(detectar_discrepancias_pre_upsert(db, COL_PASSAGEIROS_SISTEMA, docs))
         return COL_PASSAGEIROS_SISTEMA, upsert_passageiros_sistema(db, docs), len(dados) - len(docs)
 
     if categoria == "linhas":
         docs = mapear_viagens_linhas(dados)
+        if discrepancias_out is not None:
+            discrepancias_out.extend(detectar_discrepancias_pre_upsert(db, COL_VIAGENS_LINHAS, docs))
         return COL_VIAGENS_LINHAS, upsert_viagens_linhas(db, docs), len(dados) - len(docs)
 
     if categoria == "fxhr":
         docs = mapear_viagens_horario(dados)
+        if discrepancias_out is not None:
+            discrepancias_out.extend(detectar_discrepancias_pre_upsert(db, COL_VIAGENS_HORARIO, docs))
         return COL_VIAGENS_HORARIO, upsert_viagens_horario(db, docs), len(dados) - len(docs)
 
     if categoria == "ocorrencias":
         classificacao = next(v for k, v in _OCORRENCIAS.items() if k in tipo.split("_"))
         docs = mapear_viagens_ocorrencias(dados, classificacao_padrao=classificacao)
+        if discrepancias_out is not None:
+            discrepancias_out.extend(detectar_discrepancias_pre_upsert(db, COL_VIAGENS_OCORRENCIAS, docs))
         return COL_VIAGENS_OCORRENCIAS, upsert_viagens_ocorrencias(db, docs), len(dados) - len(docs)
 
     if categoria == "resumo_geral":
         #Resumo (Mensal/Quinzenal) e FCV usam o mesmo mapper; cada arquivo atualiza só os campos que possui.
         docs = mapear_viagens_sistema(dados)
+        if discrepancias_out is not None:
+            discrepancias_out.extend(detectar_discrepancias_pre_upsert(db, COL_VIAGENS_SISTEMA, docs))
         return COL_VIAGENS_SISTEMA, upsert_viagens_sistema(db, docs), len(dados) - len(docs)
 
     raise ValueError(f"Tipo de relatório '{tipo}' não possui mapeamento de persistência.")
@@ -198,9 +214,19 @@ def processar_e_persistir_html_bytes(
         from app.utils.connection_factory import ConnectionFactory  # import tardio: desacopla testes unitários
         db = ConnectionFactory().db
 
-    colecao, afetados, descartados = _persistir(db, metadados["tipo_relatorio"], conjuntos)
+    discrepancias: List[Dict[str, Any]] = []
+    colecao, afetados, descartados = _persistir(
+        db, metadados["tipo_relatorio"], conjuntos, discrepancias_out=discrepancias
+    )
     if descartados:
         logger.warning("%s: %d registros descartados (chave/data inválida).", nome_arquivo, descartados)
+    if discrepancias:
+        logger.warning(
+            "%s: %d discrepância(s) detectada(s) em relação aos dados já gravados.",
+            nome_arquivo,
+            len(discrepancias),
+        )
+        resultado["discrepancias_detectadas"] = discrepancias
 
     resultado["persistencia"] = {
         "colecao": colecao,

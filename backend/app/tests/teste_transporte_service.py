@@ -441,3 +441,27 @@ def teste_dados_reais_persistem_e_reprocessar_nao_duplica(db, arquivo):
     assert segunda["documentos_afetados"] == 0
     assert db[primeira["colecao"]].count_documents({}) == total
     assert not primeira["registros_descartados"]
+
+
+def teste_sobreposicao_mensal_sobre_quinzenal_ignora_iguais_e_alerta_discrepancia(db, html_resumo):
+    # 1. Grava primeiro como Quinzenal
+    r1 = processar_e_persistir_html_bytes(html_resumo, "Quinzenal_202608.html", db=db)
+    assert "discrepancias_detectadas" not in r1
+    assert r1["persistencia"]["documentos_afetados"] == 3
+
+    # 2. Envia Mensal com exatamente os mesmos dados -> ignora (0 afetados, sem discrepâncias)
+    r2 = processar_e_persistir_html_bytes(html_resumo, "Mensal_202608.html", db=db)
+    assert "discrepancias_detectadas" not in r2
+    assert r2["persistencia"]["documentos_afetados"] == 0
+
+    # 3. Envia Mensal com divergência apenas no dia 02/08/2026 (km_total alterado de 5.300,75 para 5.999,00)
+    html_divergente = html_resumo.replace(b"5.300,75", b"5.999,00")
+    r3 = processar_e_persistir_html_bytes(html_divergente, "Mensal_202608.html", db=db)
+    assert "discrepancias_detectadas" in r3
+    assert len(r3["discrepancias_detectadas"]) == 1
+    disc = r3["discrepancias_detectadas"][0]
+    assert disc["data"] == "2026-08-02"
+    assert disc["campo"] == "kmTotal"
+    assert disc["valor_anterior"] == 5300.75
+    assert disc["valor_novo"] == 5999.0
+    assert r3["persistencia"]["documentos_afetados"] == 1
