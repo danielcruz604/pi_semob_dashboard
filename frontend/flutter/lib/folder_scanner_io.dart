@@ -109,3 +109,13 @@ Directory? _resolverDiretorioAndroid(
   }
   return fallbackComHtml;
 }
+
+
+Future<void> salvarBytesNoCaminho(String caminho, List<int> bytes) async {
+  try {
+    final file = File(caminho);
+    if (!file.existsSync() || file.lengthSync() == 0) {
+      await file.writeAsBytes(bytes);
+    }
+  } catch (_) {}
+}

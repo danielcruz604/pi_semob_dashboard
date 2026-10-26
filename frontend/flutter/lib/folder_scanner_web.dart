@@ -17,3 +17,8 @@ Future<List<ArquivoLido>> escanearPastaNativa(
   // Na Web o carregamento é feito via seleção de arquivos (XFile)
   return [];
 }
+
+
+Future<void> salvarBytesNoCaminho(String caminho, List<int> bytes) async {
+  // Na Web o salvamento é gerenciado diretamente pelo FilePicker.saveFile
+}
