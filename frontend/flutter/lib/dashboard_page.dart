@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
@@ -7,6 +9,18 @@ import 'local_data_loader.dart';
 import 'login_page.dart';
 
 enum ModoAnalise { extratoPeriodo, compararDiasSemana }
+
+class AlertaOutlier {
+  final String titulo;
+  final String descricao;
+  final bool critico;
+
+  AlertaOutlier({
+    required this.titulo,
+    required this.descricao,
+    this.critico = false,
+  });
+}
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -32,6 +46,10 @@ class _DashboardPageState extends State<DashboardPage> {
 
   int _diaSemanaComparar = 1;
   Set<String> _datasMarcadasComparacao = {};
+
+  // Modo otimizado para telas de 32" / visualização à distância
+  bool _modoTV = false;
+  bool _alertasExpandidos = false;
 
   static const Map<int, String> _nomesCurtoDia = {
     1: 'Seg',
@@ -69,7 +87,6 @@ class _DashboardPageState extends State<DashboardPage> {
   };
 
   /// Abre o seletor nativo de pastas no Windows, macOS, Linux, iOS e Android.
-  /// Na Web (Chrome/Edge), abre diretamente o seletor de múltiplos arquivos.
   Future<void> _selecionarPastaUnificada() async {
     if (kIsWeb) {
       await _selecionarMultiplosArquivos();
@@ -102,22 +119,22 @@ class _DashboardPageState extends State<DashboardPage> {
     _aplicarDatasetCarregado(ds);
   }
 
-  /// Seleção direta de múltiplos arquivos .HTML (Funciona em todas as 6 plataformas)
+  /// Seleção direta de múltiplos arquivos .HTML (Funciona em todas as plataformas)
   Future<void> _selecionarMultiplosArquivos() async {
-    final files = await FilePicker.pickFiles(
+    final result = await FilePicker.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['html', 'htm'],
       dialogTitle: 'Selecione os arquivos HTML da SEMOB',
     );
 
-    if (files.isEmpty) return;
+    if (result.isEmpty) return;
 
     setState(() {
       _carregando = true;
-      _origemCarregada = '${files.length} arq.';
+      _origemCarregada = '${result.length} arq.';
     });
 
-    final ds = await LocalDataLoader.carregarArquivosSelecionados(files);
+    final ds = await LocalDataLoader.carregarArquivosSelecionados(result);
     _aplicarDatasetCarregado(ds);
   }
 
@@ -248,6 +265,123 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
+  /// Gera e exporta o arquivo CSV estruturado com BOM UTF-8 (compatível com Excel).
+  Future<void> _exportarRelatorioCsv(
+    List<ResumoDiario> resumos,
+    List<PassageiroDiario> passageiros,
+  ) async {
+    final mapPass = {for (var p in passageiros) p.data: p};
+    final buffer = StringBuffer();
+
+    // BOM UTF-8 para reconhecimento de acentuação no Excel
+    buffer.write('\uFEFF');
+    buffer.writeln('=== RELATÓRIO OPERACIONAL SEMOB • SÃO CAETANO DO SUL ===');
+    buffer.writeln('Escopo:;$_mesSelecionado - $_periodicidade;Linha:;${_linhaSelecionada ?? "Todas as Linhas"}');
+    buffer.writeln('Data de Extração:;${_fmtDataBR(DateTime.now())}');
+    buffer.writeln();
+    buffer.writeln(
+      'Data;Dia da Semana;Frota (Veíc.);Viagens Programadas;Viagens Realizadas;Diferença;FCV (%);KM Total;KM Improdutivo;Passageiros Catraca;Passageiros Gratuitos;Total Passageiros',
+    );
+
+    for (final r in resumos) {
+      final p = mapPass[r.data];
+      final fcv = r.viagensProg > 0 ? ((r.viagensRealiz / r.viagensProg) * 100).toStringAsFixed(2) : '100.00';
+      buffer.writeln(
+        '${r.data};${_nomesLongoDia[r.weekday] ?? ''};${r.veiculos};${r.viagensProg};${r.viagensRealiz};${r.difViagens};$fcv%;${r.kmTotal.toStringAsFixed(2)};${r.kmImprod.toStringAsFixed(2)};${p?.catraca ?? 0};${p?.naoPagantes ?? 0};${p?.totalPassageiros ?? 0}',
+      );
+    }
+
+    try {
+      final bytes = Uint8List.fromList(utf8.encode(buffer.toString()));
+      final nomeSugerido = 'relatorio_semob_${_mesSelecionado.replaceAll('/', '_')}_${_periodicidade.toLowerCase()}.csv';
+
+      final caminhoSalvo = await FilePicker.saveFile(
+        dialogTitle: 'Exportar Relatório Operacional SEMOB (CSV)',
+        fileName: nomeSugerido,
+        type: FileType.custom,
+        allowedExtensions: ['csv'],
+        bytes: bytes,
+      );
+
+      if (!kIsWeb && caminhoSalvo != null) {
+        final f = File(caminhoSalvo.toFilePath());
+        if (!f.existsSync() || f.lengthSync() == 0) {
+          await f.writeAsBytes(bytes);
+        }
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(caminhoSalvo != null ? 'Relatório exportado com sucesso!' : 'Exportação concluída.'),
+            backgroundColor: const Color(0xFF059669),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Erro ao exportar relatório: $e'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    }
+  }
+
+  /// Calcula outliers e anomalias da mobilidade urbana de SCS
+  List<AlertaOutlier> _calcularOutliers(List<ResumoDiario> resumos, List<PassageiroDiario> passageiros) {
+    final alertas = <AlertaOutlier>[];
+    if (resumos.isEmpty) return alertas;
+
+    // 1. Cumprimento / FCV Crítico (< 98%) e Viagens Suprimidas
+    for (final r in resumos) {
+      final fcv = r.viagensProg > 0 ? (r.viagensRealiz / r.viagensProg) * 100 : 100.0;
+      if (fcv < 98.0) {
+        alertas.add(AlertaOutlier(
+          titulo: 'Descumprimento de FCV em ${r.data} (${_nomesCurtoDia[r.weekday]})',
+          descricao:
+              'FCV atingiu ${fcv.toStringAsFixed(1)}% (${r.difViagens} viagens não realizadas). Impacto direto no intervalo de espera em SCS.',
+          critico: fcv < 95.0,
+        ));
+      }
+    }
+
+    // 2. Outliers de Quilometragem Total (Desvio > 25% da média de dias úteis)
+    final diasUteis = resumos.where((r) => r.weekday >= 1 && r.weekday <= 5).toList();
+    if (diasUteis.length >= 3) {
+      final mediaKm = diasUteis.map((e) => e.kmTotal).reduce((a, b) => a + b) / diasUteis.length;
+      for (final r in diasUteis) {
+        final desvio = ((r.kmTotal - mediaKm) / mediaKm).abs();
+        if (desvio > 0.25) {
+          alertas.add(AlertaOutlier(
+            titulo: 'Anomalia de Quilometragem em ${r.data}',
+            descricao:
+                'KM total (${r.kmTotal.toStringAsFixed(0)} km) desviou ${(desvio * 100).toStringAsFixed(0)}% da média dos dias úteis (${mediaKm.toStringAsFixed(0)} km).',
+            critico: false,
+          ));
+        }
+      }
+    }
+
+    // 3. Queda Anormal de Frota em Dias Úteis
+    if (diasUteis.isNotEmpty) {
+      final maxFrota = diasUteis.map((e) => e.veiculos).reduce((a, b) => a > b ? a : b);
+      for (final r in diasUteis) {
+        if (maxFrota > 0 && r.veiculos < (maxFrota * 0.75).round()) {
+          alertas.add(AlertaOutlier(
+            titulo: 'Déficit de Frota Operacional em ${r.data}',
+            descricao: 'Operando com apenas ${r.veiculos} ônibus (${maxFrota - r.veiculos} a menos que a frota de pico).',
+            critico: true,
+          ));
+        }
+      }
+    }
+
+    return alertas;
+  }
+
   @override
   Widget build(BuildContext context) {
     final resumosFiltrados = _dataset.resumos
@@ -279,6 +413,8 @@ class _DashboardPageState extends State<DashboardPage> {
             _dataPassaNoFiltro(e.data, e.dateTime))
         .toList();
 
+    final outliersDetectados = _calcularOutliers(resumosFiltrados, passageirosFiltrados);
+
     return Scaffold(
       backgroundColor: const Color(0xFFF1F5F9),
       appBar: AppBar(
@@ -300,6 +436,44 @@ class _DashboardPageState extends State<DashboardPage> {
           ],
         ),
         actions: [
+          // Alternador de Visualização para TV 32" / Painel de Controle
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 2.0),
+            child: Tooltip(
+              message: 'Ajusta fontes e contraste para leitura em telas de 32" ou à distância',
+              child: OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  backgroundColor: _modoTV ? const Color(0xFF0284C7) : Colors.transparent,
+                  foregroundColor: Colors.white,
+                  side: BorderSide(color: _modoTV ? const Color(0xFF38BDF8) : Colors.white30),
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                ),
+                onPressed: () => setState(() => _modoTV = !_modoTV),
+                icon: Icon(Icons.tv_rounded, size: 15, color: _modoTV ? Colors.white : const Color(0xFF38BDF8)),
+                label: Text(
+                  _modoTV ? 'Modo TV: ON' : 'Modo TV 32"',
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ),
+          ),
+
+          // Botão de Exportar Relatórios
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+            child: ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF059669),
+                foregroundColor: Colors.white,
+                elevation: 0,
+                padding: const EdgeInsets.symmetric(horizontal: 11),
+              ),
+              onPressed: _dataset.isEmpty ? null : () => _exportarRelatorioCsv(resumosFiltrados, passageirosFiltrados),
+              icon: const Icon(Icons.download_rounded, size: 16),
+              label: const Text('Exportar CSV', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+            ),
+          ),
+
           if (!kIsWeb)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
@@ -356,7 +530,9 @@ class _DashboardPageState extends State<DashboardPage> {
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
                           _buildBarraTopoSlim(),
-                          const SizedBox(height: 14),
+                          const SizedBox(height: 12),
+                          _buildAvisoOutliers(outliersDetectados),
+                          const SizedBox(height: 12),
                           _buildKPIsResponsivo(
                             isWide,
                             resumosFiltrados,
@@ -370,7 +546,11 @@ class _DashboardPageState extends State<DashboardPage> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Expanded(
-                                  child: _buildGraficoViagensEQuilometragem(resumosFiltrados, fxHrFiltrados, linhasFiltradas),
+                                  child: _buildGraficoViagensEQuilometragem(
+                                    resumosFiltrados,
+                                    fxHrFiltrados,
+                                    linhasFiltradas,
+                                  ),
                                 ),
                                 const SizedBox(width: 14),
                                 Expanded(
@@ -419,7 +599,7 @@ class _DashboardPageState extends State<DashboardPage> {
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(16),
-          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 12)],
+          boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 12)],
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -470,6 +650,145 @@ class _DashboardPageState extends State<DashboardPage> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// Banner compacto de avisos de outliers que afetam a mobilidade urbana em São Caetano do Sul
+  Widget _buildAvisoOutliers(List<AlertaOutlier> alertas) {
+    if (alertas.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+        decoration: BoxDecoration(
+          color: const Color(0xFFECFDF5),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: const Color(0xFF10B981).withOpacity(0.4)),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.check_circle_rounded, color: Color(0xFF059669), size: 18),
+            const SizedBox(width: 8),
+            Text(
+              'Operação Regular: Nenhum outlier crítico ou déficit de cumprimento detectado em SCS no recorte atual.',
+              style: TextStyle(
+                fontSize: _modoTV ? 13 : 11,
+                fontWeight: FontWeight.w600,
+                color: const Color(0xFF065F46),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final temCritico = alertas.any((a) => a.critico);
+    final corBase = temCritico ? const Color(0xFFDC2626) : const Color(0xFFD97706);
+    final corFundo = temCritico ? const Color(0xFFFEF2F2) : const Color(0xFFFFFBEB);
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: corFundo,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: corBase.withOpacity(0.6), width: 1.5),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: corBase, size: _modoTV ? 22 : 18),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'ALERTAS DE IMPACTO NA MOBILIDADE (SÃO CAETANO DO SUL)',
+                  style: TextStyle(
+                    fontSize: _modoTV ? 13 : 11,
+                    fontWeight: FontWeight.w900,
+                    color: corBase,
+                    letterSpacing: 0.3,
+                  ),
+                ),
+              ),
+              InkWell(
+                onTap: () => setState(() => _alertasExpandidos = !_alertasExpandidos),
+                borderRadius: BorderRadius.circular(6),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: corBase,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        '${alertas.length} Ocorrências',
+                        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white),
+                      ),
+                      const SizedBox(width: 4),
+                      Icon(
+                        _alertasExpandidos ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down,
+                        size: 16,
+                        color: Colors.white,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          // Exibe os alertas principais em chips ou lista expandida
+          if (!_alertasExpandidos)
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: alertas.take(3).map((a) {
+                return Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: corBase.withOpacity(0.3)),
+                  ),
+                  child: Text(
+                    '${a.titulo}: ${a.descricao}',
+                    style: TextStyle(fontSize: _modoTV ? 12 : 11, fontWeight: FontWeight.w600, color: const Color(0xFF0F172A)),
+                  ),
+                );
+              }).toList(),
+            )
+          else
+            Column(
+              children: alertas.map((a) {
+                return Padding(
+                  padding: const EdgeInsets.only(top: 6.0),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(Icons.arrow_right_rounded, color: corBase, size: 20),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: RichText(
+                          text: TextSpan(
+                            style: TextStyle(
+                              fontSize: _modoTV ? 13 : 11,
+                              color: const Color(0xFF1E293B),
+                            ),
+                            children: [
+                              TextSpan(text: '${a.titulo} • ', style: TextStyle(fontWeight: FontWeight.bold, color: corBase)),
+                              TextSpan(text: a.descricao),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }).toList(),
+            ),
+        ],
       ),
     );
   }
@@ -994,12 +1313,12 @@ class _DashboardPageState extends State<DashboardPage> {
     required IconData icone,
   }) {
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: EdgeInsets.all(_modoTV ? 14 : 12),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(10),
-        border: Border(left: BorderSide(color: cor, width: 4)),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 4)],
+        border: Border(left: BorderSide(color: cor, width: _modoTV ? 5 : 4)),
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 4)],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1010,17 +1329,42 @@ class _DashboardPageState extends State<DashboardPage> {
               Expanded(
                 child: Text(
                   titulo,
-                  style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Colors.blueGrey),
+                  style: TextStyle(
+                    fontSize: _modoTV ? 11 : 10,
+                    fontWeight: FontWeight.w800,
+                    color: Colors.blueGrey,
+                  ),
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              Icon(icone, size: 15, color: cor),
+              Icon(icone, size: _modoTV ? 17 : 15, color: cor),
             ],
           ),
           const SizedBox(height: 6),
-          Text(valor, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: cor)),
+          // FittedBox impede quebra de layout e garante visualização de longe
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(
+              valor,
+              style: TextStyle(
+                fontSize: _modoTV ? 24 : 18,
+                fontWeight: FontWeight.w900,
+                color: cor,
+                letterSpacing: -0.3,
+              ),
+            ),
+          ),
           const SizedBox(height: 4),
-          Text(subtitulo, style: const TextStyle(fontSize: 11, color: Colors.grey), overflow: TextOverflow.ellipsis),
+          Text(
+            subtitulo,
+            style: TextStyle(
+              fontSize: _modoTV ? 12 : 11,
+              fontWeight: _modoTV ? FontWeight.w600 : FontWeight.normal,
+              color: Colors.grey.shade600,
+            ),
+            overflow: TextOverflow.ellipsis,
+          ),
         ],
       ),
     );
@@ -1158,7 +1502,10 @@ class _DashboardPageState extends State<DashboardPage> {
                       showTitles: true,
                       interval: interval,
                       reservedSize: 44,
-                      getTitlesWidget: (v, m) => Text(_fmtMilhar(v), style: const TextStyle(fontSize: 10, color: Colors.blueGrey)),
+                      getTitlesWidget: (v, m) => Text(
+                        _fmtMilhar(v),
+                        style: TextStyle(fontSize: _modoTV ? 11 : 10, color: Colors.blueGrey, fontWeight: FontWeight.w600),
+                      ),
                     ),
                   ),
                   bottomTitles: AxisTitles(
@@ -1170,7 +1517,10 @@ class _DashboardPageState extends State<DashboardPage> {
                         if (h % 2 != 0 && horas.length > 12) return const SizedBox.shrink();
                         return Padding(
                           padding: const EdgeInsets.only(top: 6),
-                          child: Text('${h}h', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600)),
+                          child: Text(
+                            '${h}h',
+                            style: TextStyle(fontSize: _modoTV ? 11 : 10, fontWeight: FontWeight.w700),
+                          ),
                         );
                       },
                     ),
@@ -1222,7 +1572,10 @@ class _DashboardPageState extends State<DashboardPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('Top Linhas (Partidas)', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.blueGrey)),
+                Text(
+                  'Top Linhas (Partidas)',
+                  style: TextStyle(fontSize: _modoTV ? 12 : 11, fontWeight: FontWeight.bold, color: Colors.blueGrey),
+                ),
                 const SizedBox(height: 8),
                 Expanded(
                   child: topLinhas.isEmpty
@@ -1241,8 +1594,14 @@ class _DashboardPageState extends State<DashboardPage> {
                                   Row(
                                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                     children: [
-                                      Text('Linha ${item.key}', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-                                      Text('${item.value} viag.', style: const TextStyle(fontSize: 10, color: Colors.blueGrey)),
+                                      Text(
+                                        'Linha ${item.key}',
+                                        style: TextStyle(fontSize: _modoTV ? 12 : 11, fontWeight: FontWeight.bold),
+                                      ),
+                                      Text(
+                                        '${item.value} viag.',
+                                        style: TextStyle(fontSize: _modoTV ? 11 : 10, color: Colors.blueGrey, fontWeight: FontWeight.w600),
+                                      ),
                                     ],
                                   ),
                                   const SizedBox(height: 3),
@@ -1250,7 +1609,7 @@ class _DashboardPageState extends State<DashboardPage> {
                                     borderRadius: BorderRadius.circular(4),
                                     child: LinearProgressIndicator(
                                       value: ratio,
-                                      minHeight: 6,
+                                      minHeight: _modoTV ? 8 : 6,
                                       backgroundColor: const Color(0xFFE2E8F0),
                                       color: const Color(0xFF0284C7),
                                     ),
@@ -1277,8 +1636,8 @@ class _DashboardPageState extends State<DashboardPage> {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(turno, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
-            Text('${perc.toStringAsFixed(1)}%', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: cor)),
+            Text(turno, style: TextStyle(fontWeight: FontWeight.bold, fontSize: _modoTV ? 13 : 12)),
+            Text('${perc.toStringAsFixed(1)}%', style: TextStyle(fontWeight: FontWeight.bold, fontSize: _modoTV ? 12 : 11, color: cor)),
           ],
         ),
         const SizedBox(height: 4),
@@ -1286,7 +1645,7 @@ class _DashboardPageState extends State<DashboardPage> {
           borderRadius: BorderRadius.circular(6),
           child: LinearProgressIndicator(
             value: (perc / 100).clamp(0.0, 1.0),
-            minHeight: 10,
+            minHeight: _modoTV ? 12 : 10,
             backgroundColor: const Color(0xFFE2E8F0),
             color: cor,
           ),
@@ -1352,7 +1711,10 @@ class _DashboardPageState extends State<DashboardPage> {
                       showTitles: true,
                       interval: interval,
                       reservedSize: 44,
-                      getTitlesWidget: (v, m) => Text(_fmtMilhar(v), style: const TextStyle(fontSize: 10, color: Colors.blueGrey)),
+                      getTitlesWidget: (v, m) => Text(
+                        _fmtMilhar(v),
+                        style: TextStyle(fontSize: _modoTV ? 11 : 10, color: Colors.blueGrey, fontWeight: FontWeight.w600),
+                      ),
                     ),
                   ),
                   bottomTitles: AxisTitles(
@@ -1364,7 +1726,10 @@ class _DashboardPageState extends State<DashboardPage> {
                         if (idx < 0 || idx >= labels.length) return const SizedBox.shrink();
                         return Padding(
                           padding: const EdgeInsets.only(top: 6),
-                          child: Text(labels[idx], style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600)),
+                          child: Text(
+                            labels[idx],
+                            style: TextStyle(fontSize: _modoTV ? 11 : 10, fontWeight: FontWeight.w700),
+                          ),
                         );
                       },
                     ),
@@ -1402,7 +1767,7 @@ class _DashboardPageState extends State<DashboardPage> {
     required Widget child,
   }) {
     return Container(
-      height: 300,
+      height: _modoTV ? 320 : 300,
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: Colors.white,
@@ -1419,7 +1784,14 @@ class _DashboardPageState extends State<DashboardPage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(titulo, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: Color(0xFF0F172A))),
+                    Text(
+                      titulo,
+                      style: TextStyle(
+                        fontSize: _modoTV ? 14 : 13,
+                        fontWeight: FontWeight.w800,
+                        color: const Color(0xFF0F172A),
+                      ),
+                    ),
                     const SizedBox(height: 2),
                     Text(subtitulo, style: const TextStyle(fontSize: 11, color: Colors.blueGrey)),
                   ],
@@ -1459,9 +1831,22 @@ class _DashboardPageState extends State<DashboardPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'Espelho Diário Consolidado (Operação + Bilhetagem)',
-            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: Color(0xFF0F172A)),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'Espelho Diário Consolidado (Operação + Bilhetagem)',
+                style: TextStyle(
+                  fontSize: _modoTV ? 14 : 13,
+                  fontWeight: FontWeight.w800,
+                  color: const Color(0xFF0F172A),
+                ),
+              ),
+              Text(
+                '${resumos.length} registros',
+                style: const TextStyle(fontSize: 11, color: Colors.grey, fontWeight: FontWeight.bold),
+              ),
+            ],
           ),
           const SizedBox(height: 10),
           SingleChildScrollView(
