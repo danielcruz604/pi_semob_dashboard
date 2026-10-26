@@ -1,4 +1,5 @@
-import 'package:flutter/foundation.dart';
+﻿import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:fl_chart/fl_chart.dart';
@@ -6,6 +7,8 @@ import 'package:permission_handler/permission_handler.dart';
 import 'folder_scanner_io.dart' if (dart.library.html) 'folder_scanner_web.dart';
 import 'local_data_loader.dart';
 import 'login_page.dart';
+import 'relatorio_api_service.dart';
+import 'relatorio_integration.dart';
 import 'services/api_service.dart';
 import 'utils/export_service.dart';
 import 'sessao_service.dart';
@@ -55,6 +58,13 @@ class _DashboardPageState extends State<DashboardPage> {
   bool _modoTV = false;
   bool _alertasExpandidos = false;
 
+  // Ajusta todos os 31 dias para caberem perfeitamente no card
+  bool _verMesTodo = true;
+
+  final ScrollController _scrollViagens = ScrollController();
+  final ScrollController _scrollPassageiros = ScrollController();
+  late final RelatorioIntegrationController relatorioController = RelatorioIntegrationController();
+
   static const Map<int, String> _nomesCurtoDia = {
     1: 'Seg',
     2: 'Ter',
@@ -94,6 +104,14 @@ class _DashboardPageState extends State<DashboardPage> {
   void initState() {
     super.initState();
     _inicializarDadosDoBanco();
+  }
+
+  @override
+  void dispose() {
+    _scrollViagens.dispose();
+    _scrollPassageiros.dispose();
+    relatorioController.dispose();
+    super.dispose();
   }
 
   Future<void> _inicializarDadosDoBanco() async {
@@ -232,9 +250,6 @@ class _DashboardPageState extends State<DashboardPage> {
     }
   }
 
-  /// Abre o seletor nativo de pastas em todas as plataformas:
-  /// - Na Web (Chrome/Edge/Firefox): abre o seletor de diretório do navegador (`webkitdirectory`), lendo todos os `.HTML` da pasta e subpastas.
-  /// - No Windows, macOS, Linux, iOS e Android: abre o seletor de diretório do sistema operacional e escaneia recursivamente.
   Future<void> _selecionarPastaUnificada() async {
     if (kIsWeb) {
       try {
@@ -350,7 +365,6 @@ class _DashboardPageState extends State<DashboardPage> {
     }
   }
 
-  /// Seleção direta de múltiplos arquivos .HTML (Funciona em todas as 6 plataformas)
   Future<void> _selecionarMultiplosArquivos() async {
     try {
       final result = await FilePicker.pickFiles(
@@ -528,14 +542,6 @@ class _DashboardPageState extends State<DashboardPage> {
 
   static DateTime _parseStrToDate(String s) => LocalDataLoader.parseDataBR(s) ?? DateTime(2026);
 
-  late final RelatorioIntegrationController relatorioController = RelatorioIntegrationController();
-
-  @override
-  void dispose() {
-    relatorioController.dispose();
-    super.dispose();
-  }
-
   bool _gerandoRelatorio = false;
   RelatorioConsolidado? _ultimoRelatorioConsolidado;
   String? _ultimoRelatorioTexto;
@@ -549,7 +555,6 @@ class _DashboardPageState extends State<DashboardPage> {
   static String _fmtDataISO(DateTime d) =>
       '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
-  ///Retorna os filtros ativos no estado do painel já convertidos para o contrato da API
   Map<String, String?> obterFiltrosAtivosParaApi({String agrupamento = 'diario'}) {
     DateTime? inicio = _dataInicio;
     DateTime? fim = _dataFim;
@@ -574,8 +579,6 @@ class _DashboardPageState extends State<DashboardPage> {
     };
   }
 
-  ///Ponto de acoplamento pronto para o botão de geração de relatório (onPressed: gerarRelatorioIntegrado).
-  ///Envia os HTMLs carregados e solicita o relatório consolidado ao backend FastAPI
   Future<RelatorioConsolidado?> gerarRelatorioIntegrado({
     String agrupamento = 'diario',
     bool sincronizarArquivosLocais = true,
@@ -644,7 +647,6 @@ class _DashboardPageState extends State<DashboardPage> {
     }
   }
 
-  ///Gera o relatório consolidado via API e devolve diretamente o texto estruturado para exportação/exibição
   Future<String?> gerarTextoRelatorioConsolidado({
     String agrupamento = 'diario',
     bool sincronizarArquivosLocais = true,
@@ -764,6 +766,7 @@ class _DashboardPageState extends State<DashboardPage> {
 
     if (resumos.isEmpty) return alertas;
 
+    // 2. Cumprimento / FCV Crítico (< 98%) e Viagens Suprimidas
     for (final r in resumos) {
       final fcv = r.viagensProg > 0 ? (r.viagensRealiz / r.viagensProg) * 100 : 100.0;
       if (fcv < 98.0) {
@@ -776,6 +779,7 @@ class _DashboardPageState extends State<DashboardPage> {
       }
     }
 
+    // 3. Outliers de Quilometragem Total (Desvio > 25% da média de dias úteis)
     final diasUteis = resumos.where((r) => r.weekday >= 1 && r.weekday <= 5).toList();
     if (diasUteis.length >= 3) {
       final mediaKm = diasUteis.map((e) => e.kmTotal).reduce((a, b) => a + b) / diasUteis.length;
@@ -792,6 +796,7 @@ class _DashboardPageState extends State<DashboardPage> {
       }
     }
 
+    // 4. Queda Anormal de Frota em Dias Úteis
     if (diasUteis.isNotEmpty) {
       final maxFrota = diasUteis.map((e) => e.veiculos).reduce((a, b) => a > b ? a : b);
       for (final r in diasUteis) {
@@ -808,8 +813,19 @@ class _DashboardPageState extends State<DashboardPage> {
     return alertas;
   }
 
+  static Widget _emptyAxisTitle(double value, TitleMeta meta) => const SizedBox.shrink();
+
   @override
   Widget build(BuildContext context) {
+    final mediaQuery = MediaQuery.of(context);
+    final screenWidth = mediaQuery.size.width;
+    final screenHeight = mediaQuery.size.height;
+
+    // Detecta se é celular deitado (landscape em smartphone)
+    final isPhoneLandscape = screenHeight < 550 && screenWidth < 1050;
+    final isTelaLarga = screenWidth >= 1050 && !isPhoneLandscape;
+    final isMobile = screenWidth < 700 || isPhoneLandscape;
+
     final resumosFiltrados = _dataset.resumos
         .where((e) => e.periodicidade == _periodicidade && _dataPassaNoFiltro(e.data, e.dateTime))
         .toList()
@@ -847,18 +863,19 @@ class _DashboardPageState extends State<DashboardPage> {
         backgroundColor: const Color(0xFF0F172A),
         foregroundColor: Colors.white,
         elevation: 0,
-        toolbarHeight: 54,
+        toolbarHeight: _modoTV ? 62 : (isPhoneLandscape ? 48 : 54),
         title: Row(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.directions_bus_filled_rounded, color: Color(0xFF38BDF8), size: 22),
+            Icon(Icons.directions_bus_filled_rounded, color: const Color(0xFF38BDF8), size: _modoTV ? 26 : 22),
             const SizedBox(width: 8),
-            const Text(
-              'SEMOB • Monitoramento',
-              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
+            Text(
+              isTelaLarga ? 'SEMOB • Monitoramento' : 'SEMOB',
+              style: TextStyle(fontWeight: FontWeight.w700, fontSize: _modoTV ? 18 : 15),
             ),
             const SizedBox(width: 10),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              padding: EdgeInsets.symmetric(horizontal: _modoTV ? 8 : 6, vertical: _modoTV ? 3 : 2),
               decoration: BoxDecoration(
                 color: _backendOnline ? const Color(0xFF065F46) : const Color(0xFF475569),
                 borderRadius: BorderRadius.circular(10),
@@ -866,234 +883,348 @@ class _DashboardPageState extends State<DashboardPage> {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.circle, size: 7, color: _backendOnline ? const Color(0xFF34D399) : Colors.amberAccent),
-                  const SizedBox(width: 5),
-                  Text(
-                    _backendOnline ? 'MongoDB Online' : 'Modo Local',
-                    style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.white),
-                  ),
+                  Icon(Icons.circle, size: _modoTV ? 7 : 6, color: _backendOnline ? const Color(0xFF34D399) : Colors.amberAccent),
+                  if (isTelaLarga) ...[
+                    const SizedBox(width: 5),
+                    Text(
+                      _backendOnline ? 'MongoDB Online' : 'Modo Local',
+                      style: TextStyle(fontSize: _modoTV ? 11 : 10, fontWeight: FontWeight.bold, color: Colors.white),
+                    ),
+                  ],
                 ],
               ),
             ),
           ],
         ),
-        actions: [
-          IconButton(
-            tooltip: 'Sincronizar com MongoDB',
-            icon: const Icon(Icons.sync_rounded, color: Color(0xFF38BDF8), size: 20),
-            onPressed: _carregando ? null : _inicializarDadosDoBanco,
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 2.0),
-            child: Tooltip(
-              message: 'Ajusta fontes e contraste para leitura em telas de 32" ou à distância',
-              child: OutlinedButton.icon(
-                style: OutlinedButton.styleFrom(
-                  backgroundColor: _modoTV ? const Color(0xFF0284C7) : Colors.transparent,
-                  foregroundColor: Colors.white,
-                  side: BorderSide(color: _modoTV ? const Color(0xFF38BDF8) : Colors.white30),
-                  padding: const EdgeInsets.symmetric(horizontal: 10),
-                ),
-                onPressed: () => setState(() => _modoTV = !_modoTV),
-                icon: Icon(Icons.tv_rounded, size: 15, color: _modoTV ? Colors.white : const Color(0xFF38BDF8)),
-                label: Text(
-                  _modoTV ? 'Modo TV: ON' : 'Modo TV 32"',
-                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
-                ),
-              ),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
-            child: Tooltip(
-              message: 'Exporta Relatório Executivo em PDF com síntese, indicadores e glossário para superiores',
-              child: ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF059669),
-                  foregroundColor: Colors.white,
-                  elevation: 0,
-                  padding: const EdgeInsets.symmetric(horizontal: 11),
-                ),
-                onPressed: _dataset.isEmpty
-                    ? null
-                    : () => _exportarRelatorioExecutivoPdf(
-                          resumos: resumosFiltrados,
-                          passageiros: passageirosFiltrados,
-                          fcvs: fcvFiltrados,
-                          faixasHorarias: fxHrFiltrados,
-                          linhas: linhasFiltradas,
-                          outliers: outliersDetectados,
-                        ),
-                icon: const Icon(Icons.picture_as_pdf_rounded, size: 16),
-                label: const Text('Exportar PDF', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-              ),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
-            child: Tooltip(
-              message: kIsWeb
-                  ? 'Selecionar múltiplos arquivos da pasta (selecione todos com Ctrl+A)'
-                  : 'Abre e escaneia recursivamente todos os relatórios HTML da pasta selecionada',
-              child: ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF0284C7),
-                  foregroundColor: Colors.white,
-                  elevation: 0,
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                ),
-                onPressed: _carregando ? null : _selecionarPastaUnificada,
-                icon: const Icon(Icons.folder_open_rounded, size: 16),
-                label: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 130),
-                  child: Text(
-                    _origemCarregada == null
-                        ? (kIsWeb ? 'Carregar Pasta' : 'Abrir Pasta')
-                        : _origemCarregada!,
-                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
-            child: OutlinedButton.icon(
-              style: OutlinedButton.styleFrom(
-                foregroundColor: Colors.white,
-                side: const BorderSide(color: Color(0xFF38BDF8)),
-                padding: const EdgeInsets.symmetric(horizontal: 10),
-              ),
-              onPressed: _carregando ? null : _selecionarMultiplosArquivos,
-              icon: const Icon(Icons.file_present_rounded, size: 15, color: Color(0xFF38BDF8)),
-              label: const Text('HTMLs', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-            ),
-          ),
-          if (_nomeUsuarioLogado != null && MediaQuery.of(context).size.width >= 720)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 6.0),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.account_circle_rounded, color: Color(0xFF38BDF8), size: 18),
-                  const SizedBox(width: 6),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 160),
-                    child: Text(
-                      _nomeUsuarioLogado!,
-                      style: const TextStyle(fontSize: 12, color: Colors.white70),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          IconButton(
-            tooltip: _nomeUsuarioLogado == null
-                ? 'Sair / Trocar Operador'
-                : 'Sair ($_nomeUsuarioLogado)',
-            icon: const Icon(Icons.logout_rounded, color: Colors.white70, size: 20),
-            onPressed: _sairParaTelaDeLogin,
-          ),
-          const SizedBox(width: 6),
-        ],
+        actions: _construirAcoesAppBar(
+          isTelaLarga: isTelaLarga,
+          resumos: resumosFiltrados,
+          passageiros: passageirosFiltrados,
+          fcvs: fcvFiltrados,
+          faixasHorarias: fxHrFiltrados,
+          linhas: linhasFiltradas,
+          outliers: outliersDetectados,
+        ),
       ),
-      body: _carregando
-          ? const Center(child: CircularProgressIndicator())
-          : _dataset.isEmpty
-              ? _buildEmptyState()
-              : LayoutBuilder(
-                  builder: (context, constraints) {
-                    final isWide = constraints.maxWidth >= 850;
-                    return SingleChildScrollView(
-                      padding: const EdgeInsets.all(14),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          if (_statusUpload != null)
-                            Container(
-                              margin: const EdgeInsets.only(bottom: 12),
-                              padding: const EdgeInsets.all(10),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFEFF6FF),
-                                borderRadius: BorderRadius.circular(8),
-                                border: Border.all(color: const Color(0xFF3B82F6)),
+      // SafeArea protege contra a câmera punch hole na lateral e a barra de navegação/gestos do Android no rodapé
+      body: SafeArea(
+        left: true,
+        right: true,
+        bottom: true,
+        top: false,
+        child: _carregando
+            ? const Center(child: CircularProgressIndicator())
+            : _dataset.isEmpty
+                ? _buildEmptyState()
+                : LayoutBuilder(
+                    builder: (context, constraints) {
+                      final isWide = constraints.maxWidth >= 950 && !isPhoneLandscape;
+                      return SingleChildScrollView(
+                        padding: EdgeInsets.fromLTRB(
+                          _modoTV ? 18 : (isMobile ? 12 : 14),
+                          _modoTV ? 18 : (isMobile ? 10 : 14),
+                          _modoTV ? 18 : (isMobile ? 12 : 14),
+                          _modoTV ? 24 : 32,
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            if (_statusUpload != null)
+                              Container(
+                                margin: const EdgeInsets.only(bottom: 12),
+                                padding: const EdgeInsets.all(10),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFEFF6FF),
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(color: const Color(0xFF3B82F6)),
+                                ),
+                                child: Row(
+                                  children: [
+                                    const SizedBox(
+                                      width: 14,
+                                      height: 14,
+                                      child: CircularProgressIndicator(strokeWidth: 2),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: Text(
+                                        _statusUpload!,
+                                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF1D4ED8)),
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
-                              child: Row(
+                            _buildBarraTopoSlim(),
+                            const SizedBox(height: 12),
+                            _buildAvisoOutliers(outliersDetectados),
+                            const SizedBox(height: 12),
+                            _buildKPIsResponsivo(
+                              isWide,
+                              isPhoneLandscape,
+                              resumosFiltrados,
+                              passageirosFiltrados,
+                              fxHrFiltrados,
+                              linhasFiltradas,
+                            ),
+                            const SizedBox(height: 14),
+                            if (isWide) ...[
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  const SizedBox(
-                                    width: 14,
-                                    height: 14,
-                                    child: CircularProgressIndicator(strokeWidth: 2),
+                                  Expanded(
+                                    child: _buildGraficoViagensEQuilometragem(
+                                      resumosFiltrados,
+                                      fxHrFiltrados,
+                                      linhasFiltradas,
+                                    ),
                                   ),
-                                  const SizedBox(width: 10),
-                                  Text(
-                                    _statusUpload!,
-                                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF1D4ED8)),
+                                  const SizedBox(width: 14),
+                                  Expanded(
+                                    child: _buildGraficoPassageiros(passageirosFiltrados),
                                   ),
                                 ],
                               ),
-                            ),
-                          _buildBarraTopoSlim(),
-                          const SizedBox(height: 12),
-                          _buildAvisoOutliers(outliersDetectados),
-                          const SizedBox(height: 12),
-                          _buildKPIsResponsivo(
-                            isWide,
-                            resumosFiltrados,
-                            passageirosFiltrados,
-                            fxHrFiltrados,
-                            linhasFiltradas,
-                          ),
-                          const SizedBox(height: 14),
-                          if (isWide) ...[
-                            Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Expanded(
-                                  child: _buildGraficoViagensEQuilometragem(
-                                    resumosFiltrados,
-                                    fxHrFiltrados,
-                                    linhasFiltradas,
+                              const SizedBox(height: 14),
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Expanded(
+                                    child: _buildGraficoFaixaHoraria(fxHrFiltrados),
                                   ),
-                                ),
-                                const SizedBox(width: 14),
-                                Expanded(
-                                  child: _buildGraficoPassageiros(passageirosFiltrados),
-                                ),
-                              ],
-                            ),
+                                  const SizedBox(width: 14),
+                                  Expanded(
+                                    child: _buildGraficoTurnosERanking(fcvFiltrados, fxHrFiltrados, resumosFiltrados),
+                                  ),
+                                ],
+                              ),
+                            ] else ...[
+                              _buildGraficoViagensEQuilometragem(resumosFiltrados, fxHrFiltrados, linhasFiltradas),
+                              const SizedBox(height: 14),
+                              _buildGraficoPassageiros(passageirosFiltrados),
+                              const SizedBox(height: 14),
+                              _buildGraficoFaixaHoraria(fxHrFiltrados),
+                              const SizedBox(height: 14),
+                              _buildGraficoTurnosERanking(fcvFiltrados, fxHrFiltrados, resumosFiltrados),
+                            ],
                             const SizedBox(height: 14),
-                            Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Expanded(
-                                  child: _buildGraficoFaixaHoraria(fxHrFiltrados),
-                                ),
-                                const SizedBox(width: 14),
-                                Expanded(
-                                  child: _buildGraficoTurnosERanking(fcvFiltrados, fxHrFiltrados, resumosFiltrados),
-                                ),
-                              ],
-                            ),
-                          ] else ...[
-                            _buildGraficoViagensEQuilometragem(resumosFiltrados, fxHrFiltrados, linhasFiltradas),
-                            const SizedBox(height: 14),
-                            _buildGraficoPassageiros(passageirosFiltrados),
-                            const SizedBox(height: 14),
-                            _buildGraficoFaixaHoraria(fxHrFiltrados),
-                            const SizedBox(height: 14),
-                            _buildGraficoTurnosERanking(fcvFiltrados, fxHrFiltrados, resumosFiltrados),
+                            _buildTabelaResumo(resumosFiltrados, passageirosFiltrados),
                           ],
-                          const SizedBox(height: 14),
-                          _buildTabelaResumo(resumosFiltrados, passageirosFiltrados),
-                        ],
-                      ),
-                    );
-                  },
-                ),
+                        ),
+                      );
+                    },
+                  ),
+      ),
     );
+  }
+
+  List<Widget> _construirAcoesAppBar({
+    required bool isTelaLarga,
+    required List<ResumoDiario> resumos,
+    required List<PassageiroDiario> passageiros,
+    required List<FcvDiario> fcvs,
+    required List<FaixaHorariaItem> faixasHorarias,
+    required List<LinhaDiaria> linhas,
+    required List<AlertaOutlier> outliers,
+  }) {
+    if (!isTelaLarga) {
+      return [
+        IconButton(
+          tooltip: 'Sincronizar com MongoDB',
+          icon: Icon(Icons.sync_rounded, color: const Color(0xFF38BDF8), size: _modoTV ? 24 : 20),
+          onPressed: _carregando ? null : _inicializarDadosDoBanco,
+        ),
+        IconButton(
+          tooltip: _modoTV ? 'Modo TV: ON' : 'Modo TV',
+          icon: Icon(Icons.tv_rounded, color: _modoTV ? Colors.cyanAccent : Colors.white70, size: 20),
+          onPressed: () => setState(() => _modoTV = !_modoTV),
+        ),
+        PopupMenuButton<String>(
+          icon: const Icon(Icons.more_vert_rounded, color: Colors.white),
+          onSelected: (val) {
+            if (val == 'pdf' && !_dataset.isEmpty) {
+              _exportarRelatorioExecutivoPdf(
+                resumos: resumos,
+                passageiros: passageiros,
+                fcvs: fcvs,
+                faixasHorarias: faixasHorarias,
+                linhas: linhas,
+                outliers: outliers,
+              );
+            }
+            if (val == 'pasta') _selecionarPastaUnificada();
+            if (val == 'htmls') _selecionarMultiplosArquivos();
+            if (val == 'sair') _sairParaTelaDeLogin();
+          },
+          itemBuilder: (context) => [
+            PopupMenuItem(
+              value: 'pdf',
+              enabled: !_dataset.isEmpty,
+              child: const Row(
+                children: [
+                  Icon(Icons.picture_as_pdf_rounded, color: Color(0xFF059669), size: 18),
+                  SizedBox(width: 8),
+                  Text('Exportar PDF'),
+                ],
+              ),
+            ),
+            const PopupMenuItem(
+              value: 'pasta',
+              child: Row(
+                children: [
+                  Icon(Icons.folder_open_rounded, color: Color(0xFF0284C7), size: 18),
+                  SizedBox(width: 8),
+                  Text(kIsWeb ? 'Carregar Pasta' : 'Abrir Pasta'),
+                ],
+              ),
+            ),
+            const PopupMenuItem(
+              value: 'htmls',
+              child: Row(
+                children: [
+                  Icon(Icons.file_present_rounded, color: Color(0xFF38BDF8), size: 18),
+                  SizedBox(width: 8),
+                  Text('Selecionar HTMLs'),
+                ],
+              ),
+            ),
+            const PopupMenuDivider(),
+            const PopupMenuItem(
+              value: 'sair',
+              child: Row(
+                children: [
+                  Icon(Icons.logout_rounded, color: Colors.redAccent, size: 18),
+                  SizedBox(width: 8),
+                  Text('Sair do Sistema'),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ];
+    }
+
+    return [
+      IconButton(
+        tooltip: 'Sincronizar com MongoDB',
+        icon: Icon(Icons.sync_rounded, color: const Color(0xFF38BDF8), size: _modoTV ? 24 : 20),
+        onPressed: _carregando ? null : _inicializarDadosDoBanco,
+      ),
+      Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 2.0),
+        child: Tooltip(
+          message: 'Ajusta fontes e contraste para leitura em telas de 32" ou à distância',
+          child: OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(
+              backgroundColor: _modoTV ? const Color(0xFF0284C7) : Colors.transparent,
+              foregroundColor: Colors.white,
+              side: BorderSide(color: _modoTV ? const Color(0xFF38BDF8) : Colors.white30, width: 1.5),
+              padding: EdgeInsets.symmetric(horizontal: _modoTV ? 14 : 10),
+            ),
+            onPressed: () => setState(() => _modoTV = !_modoTV),
+            icon: Icon(Icons.tv_rounded, size: _modoTV ? 18 : 15, color: _modoTV ? Colors.white : const Color(0xFF38BDF8)),
+            label: Text(
+              _modoTV ? 'Modo TV: ON' : 'Modo TV 32"',
+              style: TextStyle(fontSize: _modoTV ? 13 : 12, fontWeight: FontWeight.bold),
+            ),
+          ),
+        ),
+      ),
+      Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+        child: Tooltip(
+          message: 'Exporta Relatório Executivo em PDF com síntese, indicadores e glossário para superiores',
+          child: ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF059669),
+              foregroundColor: Colors.white,
+              elevation: 0,
+              padding: EdgeInsets.symmetric(horizontal: _modoTV ? 14 : 11),
+            ),
+            onPressed: _dataset.isEmpty
+                ? null
+                : () => _exportarRelatorioExecutivoPdf(
+                      resumos: resumos,
+                      passageiros: passageiros,
+                      fcvs: fcvs,
+                      faixasHorarias: faixasHorarias,
+                      linhas: linhas,
+                      outliers: outliers,
+                    ),
+            icon: Icon(Icons.picture_as_pdf_rounded, size: _modoTV ? 18 : 16),
+            label: Text('Exportar PDF', style: TextStyle(fontSize: _modoTV ? 13 : 12, fontWeight: FontWeight.bold)),
+          ),
+        ),
+      ),
+      Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+        child: Tooltip(
+          message: kIsWeb
+              ? 'Selecionar múltiplos arquivos da pasta (selecione todos com Ctrl+A)'
+              : 'Abre e escaneia recursivamente todos os relatórios HTML da pasta selecionada',
+          child: ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF0284C7),
+              foregroundColor: Colors.white,
+              elevation: 0,
+              padding: EdgeInsets.symmetric(horizontal: _modoTV ? 14 : 12),
+            ),
+            onPressed: _carregando ? null : _selecionarPastaUnificada,
+            icon: Icon(Icons.folder_open_rounded, size: _modoTV ? 18 : 16),
+            label: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 130),
+              child: Text(
+                _origemCarregada == null
+                    ? (kIsWeb ? 'Carregar Pasta' : 'Abrir Pasta')
+                    : _origemCarregada!,
+                style: TextStyle(fontSize: _modoTV ? 13 : 12, fontWeight: FontWeight.bold),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ),
+        ),
+      ),
+      Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+        child: OutlinedButton.icon(
+          style: OutlinedButton.styleFrom(
+            foregroundColor: Colors.white,
+            side: const BorderSide(color: Color(0xFF38BDF8)),
+            padding: EdgeInsets.symmetric(horizontal: _modoTV ? 12 : 10),
+          ),
+          onPressed: _carregando ? null : _selecionarMultiplosArquivos,
+          icon: Icon(Icons.file_present_rounded, size: _modoTV ? 17 : 15, color: const Color(0xFF38BDF8)),
+          label: Text('HTMLs', style: TextStyle(fontSize: _modoTV ? 13 : 12, fontWeight: FontWeight.bold)),
+        ),
+      ),
+      if (_nomeUsuarioLogado != null)
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6.0),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.account_circle_rounded, color: Color(0xFF38BDF8), size: 18),
+              const SizedBox(width: 6),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 160),
+                child: Text(
+                  _nomeUsuarioLogado!,
+                  style: const TextStyle(fontSize: 12, color: Colors.white70),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+        ),
+      IconButton(
+        tooltip: _nomeUsuarioLogado == null
+            ? 'Sair / Trocar Operador'
+            : 'Sair ($_nomeUsuarioLogado)',
+        icon: Icon(Icons.logout_rounded, color: Colors.white70, size: _modoTV ? 22 : 20),
+        onPressed: _sairParaTelaDeLogin,
+      ),
+      const SizedBox(width: 6),
+    ];
   }
 
   Widget _buildEmptyState() {
@@ -1105,7 +1236,7 @@ class _DashboardPageState extends State<DashboardPage> {
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(16),
-          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 12)],
+          boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 12)],
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -1160,24 +1291,26 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   Widget _buildAvisoOutliers(List<AlertaOutlier> alertas) {
+    final isMobile = MediaQuery.of(context).size.width < 700 || MediaQuery.of(context).size.height < 550;
+
     if (alertas.isEmpty) {
       return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+        padding: EdgeInsets.symmetric(horizontal: 14, vertical: _modoTV ? 12 : 9),
         decoration: BoxDecoration(
           color: const Color(0xFFECFDF5),
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: const Color(0xFF10B981).withOpacity(0.4)),
+          border: Border.all(color: const Color(0xFF10B981).withValues(alpha: 0.4)),
         ),
         child: Row(
           children: [
-            const Icon(Icons.check_circle_rounded, color: Color(0xFF059669), size: 18),
-            const SizedBox(width: 8),
+            Icon(Icons.check_circle_rounded, color: const Color(0xFF059669), size: _modoTV ? 22 : 18),
+            const SizedBox(width: 10),
             Expanded(
               child: Text(
-                'Operação Regular: Nenhum outlier crítico ou déficit de cumprimento detectado em SCS no recorte atual.',
+                'Operação Regular: Nenhum outlier crítico detectado em SCS.',
                 style: TextStyle(
-                  fontSize: _modoTV ? 13 : 11,
-                  fontWeight: FontWeight.w600,
+                  fontSize: _modoTV ? 14 : 11,
+                  fontWeight: FontWeight.w700,
                   color: const Color(0xFF065F46),
                 ),
               ),
@@ -1192,24 +1325,24 @@ class _DashboardPageState extends State<DashboardPage> {
     final corFundo = temCritico ? const Color(0xFFFEF2F2) : const Color(0xFFFFFBEB);
 
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: EdgeInsets.all(_modoTV ? 16 : 12),
       decoration: BoxDecoration(
         color: corFundo,
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: corBase.withOpacity(0.6), width: 1.5),
+        border: Border.all(color: corBase.withValues(alpha: 0.6), width: 1.5),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Icon(Icons.warning_amber_rounded, color: corBase, size: _modoTV ? 22 : 18),
+              Icon(Icons.warning_amber_rounded, color: corBase, size: _modoTV ? 26 : 18),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  'ALERTAS DE IMPACTO NA MOBILIDADE (SÃO CAETANO DO SUL)',
+                  isMobile ? 'ALERTAS DE MOBILIDADE' : 'ALERTAS DE IMPACTO NA MOBILIDADE (SÃO CAETANO DO SUL)',
                   style: TextStyle(
-                    fontSize: _modoTV ? 13 : 11,
+                    fontSize: _modoTV ? 14 : 11,
                     fontWeight: FontWeight.w900,
                     color: corBase,
                     letterSpacing: 0.3,
@@ -1220,7 +1353,7 @@ class _DashboardPageState extends State<DashboardPage> {
                 onTap: () => setState(() => _alertasExpandidos = !_alertasExpandidos),
                 borderRadius: BorderRadius.circular(6),
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  padding: EdgeInsets.symmetric(horizontal: _modoTV ? 12 : 8, vertical: _modoTV ? 6 : 4),
                   decoration: BoxDecoration(
                     color: corBase,
                     borderRadius: BorderRadius.circular(6),
@@ -1230,12 +1363,12 @@ class _DashboardPageState extends State<DashboardPage> {
                     children: [
                       Text(
                         '${alertas.length} Ocorrências',
-                        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white),
+                        style: TextStyle(fontSize: _modoTV ? 13 : 11, fontWeight: FontWeight.bold, color: Colors.white),
                       ),
                       const SizedBox(width: 4),
                       Icon(
                         _alertasExpandidos ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down,
-                        size: 16,
+                        size: 18,
                         color: Colors.white,
                       ),
                     ],
@@ -1249,17 +1382,21 @@ class _DashboardPageState extends State<DashboardPage> {
             Wrap(
               spacing: 8,
               runSpacing: 6,
-              children: alertas.take(3).map((a) {
+              children: alertas.take(isMobile ? 2 : 3).map((a) {
                 return Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  padding: EdgeInsets.symmetric(horizontal: _modoTV ? 12 : 10, vertical: _modoTV ? 7 : 5),
                   decoration: BoxDecoration(
                     color: Colors.white,
                     borderRadius: BorderRadius.circular(6),
-                    border: Border.all(color: corBase.withOpacity(0.3)),
+                    border: Border.all(color: corBase.withValues(alpha: 0.3)),
                   ),
                   child: Text(
                     '${a.titulo}: ${a.descricao}',
-                    style: TextStyle(fontSize: _modoTV ? 12 : 11, fontWeight: FontWeight.w600, color: const Color(0xFF0F172A)),
+                    style: TextStyle(
+                      fontSize: _modoTV ? 13 : 11,
+                      fontWeight: FontWeight.w700,
+                      color: const Color(0xFF0F172A),
+                    ),
                   ),
                 );
               }).toList(),
@@ -1272,13 +1409,13 @@ class _DashboardPageState extends State<DashboardPage> {
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Icon(Icons.arrow_right_rounded, color: corBase, size: 20),
+                      Icon(Icons.arrow_right_rounded, color: corBase, size: 24),
                       const SizedBox(width: 4),
                       Expanded(
                         child: RichText(
                           text: TextSpan(
                             style: TextStyle(
-                              fontSize: _modoTV ? 13 : 11,
+                              fontSize: _modoTV ? 14 : 11,
                               color: const Color(0xFF1E293B),
                             ),
                             children: [
@@ -1315,7 +1452,7 @@ class _DashboardPageState extends State<DashboardPage> {
         : 'Período';
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      padding: EdgeInsets.symmetric(horizontal: 14, vertical: _modoTV ? 12 : 10),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(10),
@@ -1362,7 +1499,6 @@ class _DashboardPageState extends State<DashboardPage> {
             items: ['Todas', ..._dataset.linhasDisponiveis],
             onChanged: (v) => setState(() => _linhaSelecionada = (v == 'Todas') ? null : v),
           ),
-
           Container(
             padding: const EdgeInsets.all(3),
             decoration: BoxDecoration(
@@ -1387,7 +1523,6 @@ class _DashboardPageState extends State<DashboardPage> {
               ],
             ),
           ),
-
           if (_modoAtivo == ModoAnalise.extratoPeriodo) ...[
             _pillSelect(
               icone: Icons.bolt_rounded,
@@ -1566,7 +1701,7 @@ class _DashboardPageState extends State<DashboardPage> {
   }) {
     final valorSeguro = items.contains(value) ? value : items.first;
     return Container(
-      height: 34,
+      height: _modoTV ? 38 : 34,
       padding: const EdgeInsets.symmetric(horizontal: 10),
       decoration: BoxDecoration(
         color: const Color(0xFFF8FAFC),
@@ -1576,14 +1711,25 @@ class _DashboardPageState extends State<DashboardPage> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icone, size: 14, color: Colors.blueGrey),
+          Icon(icone, size: _modoTV ? 16 : 14, color: Colors.blueGrey),
           const SizedBox(width: 5),
-          Text('$label: ', style: const TextStyle(fontSize: 11, color: Colors.blueGrey, fontWeight: FontWeight.w600)),
+          Text(
+            '$label: ',
+            style: TextStyle(
+              fontSize: _modoTV ? 12 : 11,
+              color: Colors.blueGrey,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
           DropdownButtonHideUnderline(
             child: DropdownButton<String>(
               value: valorSeguro,
               isDense: true,
-              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF0F172A)),
+              style: TextStyle(
+                fontSize: _modoTV ? 13 : 12,
+                fontWeight: FontWeight.bold,
+                color: const Color(0xFF0F172A),
+              ),
               items: items.map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
               onChanged: onChanged,
             ),
@@ -1603,21 +1749,21 @@ class _DashboardPageState extends State<DashboardPage> {
       onTap: onTap,
       borderRadius: BorderRadius.circular(6),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        padding: EdgeInsets.symmetric(horizontal: _modoTV ? 12 : 10, vertical: _modoTV ? 7 : 6),
         decoration: BoxDecoration(
           color: ativo ? Colors.white : Colors.transparent,
           borderRadius: BorderRadius.circular(6),
-          boxShadow: ativo ? [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 3)] : null,
+          boxShadow: ativo ? [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 3)] : null,
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icone, size: 14, color: ativo ? const Color(0xFF0284C7) : Colors.blueGrey),
-            const SizedBox(width: 5),
+            Icon(icone, size: _modoTV ? 16 : 14, color: ativo ? const Color(0xFF0284C7) : Colors.blueGrey),
+            const SizedBox(width: 6),
             Text(
               titulo,
               style: TextStyle(
-                fontSize: 12,
+                fontSize: _modoTV ? 13 : 12,
                 fontWeight: FontWeight.bold,
                 color: ativo ? const Color(0xFF0F172A) : Colors.blueGrey,
               ),
@@ -1697,6 +1843,7 @@ class _DashboardPageState extends State<DashboardPage> {
 
   Widget _buildKPIsResponsivo(
     bool isWide,
+    bool isPhoneLandscape,
     List<ResumoDiario> resumos,
     List<PassageiroDiario> passageiros,
     List<FaixaHorariaItem> fxHr,
@@ -1730,7 +1877,6 @@ class _DashboardPageState extends State<DashboardPage> {
       }
     }
 
-    // Fallback: se a frota estiver zerada nos resumos, busca o pico real nas faixas horárias
     if (maxFrota == 0 && fxHr.isNotEmpty) {
       for (final f in fxHr) {
         if (f.veiculos > maxFrota) maxFrota = f.veiculos;
@@ -1800,8 +1946,30 @@ class _DashboardPageState extends State<DashboardPage> {
         children: [
           for (int i = 0; i < cards.length; i++) ...[
             Expanded(child: cards[i]),
-            if (i < cards.length - 1) const SizedBox(width: 12),
+            if (i < cards.length - 1) SizedBox(width: _modoTV ? 14 : 12),
           ]
+        ],
+      );
+    }
+
+    if (isPhoneLandscape) {
+      return Column(
+        children: [
+          Row(children: [
+            Expanded(child: cards[0]),
+            const SizedBox(width: 8),
+            Expanded(child: cards[1]),
+            const SizedBox(width: 8),
+            Expanded(child: cards[2]),
+          ]),
+          const SizedBox(height: 8),
+          Row(children: [
+            Expanded(child: cards[3]),
+            const SizedBox(width: 8),
+            Expanded(child: cards[4]),
+            const SizedBox(width: 8),
+            Expanded(child: cards[5]),
+          ]),
         ],
       );
     }
@@ -1824,13 +1992,21 @@ class _DashboardPageState extends State<DashboardPage> {
     required Color cor,
     required IconData icone,
   }) {
+    final isMobile = MediaQuery.of(context).size.width < 700 || MediaQuery.of(context).size.height < 550;
+
     return Container(
-      padding: EdgeInsets.all(_modoTV ? 14 : 12),
+      padding: EdgeInsets.all(_modoTV ? 16 : (isMobile ? 10 : 12)),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(10),
-        border: Border(left: BorderSide(color: cor, width: _modoTV ? 5 : 4)),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 4)],
+        border: Border(left: BorderSide(color: cor, width: _modoTV ? 6 : 4)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: _modoTV ? 0.06 : 0.03),
+            blurRadius: _modoTV ? 8 : 4,
+            offset: const Offset(0, 2),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1842,37 +2018,38 @@ class _DashboardPageState extends State<DashboardPage> {
                 child: Text(
                   titulo,
                   style: TextStyle(
-                    fontSize: _modoTV ? 11 : 10,
+                    fontSize: _modoTV ? 12 : (isMobile ? 9 : 10),
                     fontWeight: FontWeight.w800,
-                    color: Colors.blueGrey,
+                    color: _modoTV ? const Color(0xFF334155) : Colors.blueGrey,
+                    letterSpacing: _modoTV ? 0.4 : 0.0,
                   ),
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              Icon(icone, size: _modoTV ? 17 : 15, color: cor),
+              Icon(icone, size: _modoTV ? 20 : (isMobile ? 14 : 15), color: cor),
             ],
           ),
-          const SizedBox(height: 6),
+          SizedBox(height: _modoTV ? 8 : (isMobile ? 4 : 6)),
           FittedBox(
             fit: BoxFit.scaleDown,
             alignment: Alignment.centerLeft,
             child: Text(
               valor,
               style: TextStyle(
-                fontSize: _modoTV ? 24 : 18,
+                fontSize: _modoTV ? 32 : (isMobile ? 18 : 20),
                 fontWeight: FontWeight.w900,
                 color: cor,
-                letterSpacing: -0.3,
+                letterSpacing: -0.5,
               ),
             ),
           ),
-          const SizedBox(height: 4),
+          SizedBox(height: _modoTV ? 6 : 4),
           Text(
             subtitulo,
             style: TextStyle(
-              fontSize: _modoTV ? 12 : 11,
-              fontWeight: _modoTV ? FontWeight.w600 : FontWeight.normal,
-              color: Colors.grey.shade600,
+              fontSize: _modoTV ? 13 : (isMobile ? 10 : 11),
+              fontWeight: _modoTV ? FontWeight.w700 : FontWeight.normal,
+              color: _modoTV ? const Color(0xFF475569) : Colors.grey.shade600,
             ),
             overflow: TextOverflow.ellipsis,
           ),
@@ -1919,11 +2096,14 @@ class _DashboardPageState extends State<DashboardPage> {
           _bolinhaLegenda(const Color(0xFFCBD5E1), 'Prog.'),
           const SizedBox(width: 8),
           _bolinhaLegenda(const Color(0xFF0284C7), 'Realiz.'),
+          const SizedBox(width: 12),
+          _botaoAlternarAjuste(),
         ],
       ),
       child: datas.isEmpty
           ? const Center(child: Text('Sem dados para os dias selecionados.'))
           : _barChartDuplo(
+              controller: _scrollViagens,
               labels: datas.map(_fmtCurto).toList(),
               valoresA: datas.map((d) => mapProg[d] ?? 0).toList(),
               valoresB: datas.map((d) => mapReal[d] ?? 0).toList(),
@@ -1947,11 +2127,14 @@ class _DashboardPageState extends State<DashboardPage> {
           _bolinhaLegenda(const Color(0xFF0284C7), 'Pagantes'),
           const SizedBox(width: 8),
           _bolinhaLegenda(const Color(0xFFF97316), 'Gratuidade'),
+          const SizedBox(width: 12),
+          _botaoAlternarAjuste(),
         ],
       ),
       child: passageiros.isEmpty
           ? const Center(child: Text('Sem dados de passageiros para este filtro.'))
           : _barChartDuplo(
+              controller: _scrollPassageiros,
               labels: labels,
               valoresA: pagantes,
               valoresB: gratuitos,
@@ -1961,7 +2144,53 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
+  Widget _botaoAlternarAjuste() {
+    return InkWell(
+      onTap: () {
+        setState(() => _verMesTodo = !_verMesTodo);
+        if (_verMesTodo) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (_scrollViagens.hasClients) _scrollViagens.jumpTo(0);
+            if (_scrollPassageiros.hasClients) _scrollPassageiros.jumpTo(0);
+          });
+        }
+      },
+      borderRadius: BorderRadius.circular(6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: _verMesTodo ? const Color(0xFFE0F2FE) : const Color(0xFFF1F5F9),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: _verMesTodo ? const Color(0xFF0284C7) : const Color(0xFFCBD5E1),
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              _verMesTodo ? Icons.fit_screen_rounded : Icons.view_week_rounded,
+              size: 13,
+              color: _verMesTodo ? const Color(0xFF0369A1) : Colors.blueGrey,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              _verMesTodo ? 'Mês Todo' : 'Expandido',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
+                color: _verMesTodo ? const Color(0xFF0369A1) : Colors.blueGrey.shade800,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildGraficoFaixaHoraria(List<FaixaHorariaItem> fxHr) {
+    final isMobile = MediaQuery.of(context).size.width < 700 || MediaQuery.of(context).size.height < 550;
+
     final Map<int, double> viagensPorHora = {};
     for (final item in fxHr) {
       viagensPorHora[item.hora] = (viagensPorHora[item.hora] ?? 0) + item.viagens;
@@ -1970,76 +2199,121 @@ class _DashboardPageState extends State<DashboardPage> {
     final horas = viagensPorHora.keys.toList()..sort();
     final maxVal = viagensPorHora.values.isEmpty ? 10.0 : viagensPorHora.values.reduce((a, b) => a > b ? a : b);
     final interval = _calcularIntervalo(maxVal);
-    final maxY = (((maxVal * 1.2) / interval).ceil() * interval).toDouble();
 
-    return _boxGrafico(
-      titulo: 'Viagens por Faixa Horária (0h às 23h)',
-      subtitulo: _linhaSelecionada == null ? 'Soma de todas as linhas' : 'Operação da Linha $_linhaSelecionada',
-      legenda: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _bolinhaLegenda(const Color(0xFFE11D48), 'Pico'),
-          const SizedBox(width: 8),
-          _bolinhaLegenda(const Color(0xFF475569), 'Normal'),
-        ],
-      ),
-      child: horas.isEmpty
-          ? const Center(child: Text('Sem dados de faixa horária.'))
-          : BarChart(
-              BarChartData(
-                maxY: maxY,
-                borderData: FlBorderData(show: false),
-                gridData: const FlGridData(drawVerticalLine: false),
-                barTouchData: _tooltipPadrao(),
-                barGroups: horas.map((h) {
-                  final pico = (h >= 6 && h <= 8) || (h >= 17 && h <= 19);
-                  return BarChartGroupData(
-                    x: h,
-                    barRods: [
-                      BarChartRodData(
-                        toY: viagensPorHora[h]!,
-                        color: pico ? const Color(0xFFE11D48) : const Color(0xFF475569),
-                        width: 12,
-                        borderRadius: BorderRadius.circular(3),
-                      ),
-                    ],
-                  );
-                }).toList(),
-                titlesData: FlTitlesData(
-                  rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                  topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                  leftTitles: AxisTitles(
-                    sideTitles: SideTitles(
-                      showTitles: true,
-                      interval: interval,
-                      reservedSize: 44,
-                      getTitlesWidget: (v, m) => Text(
-                        _fmtMilhar(v),
-                        style: TextStyle(fontSize: _modoTV ? 11 : 10, color: Colors.blueGrey, fontWeight: FontWeight.w600),
-                      ),
-                    ),
-                  ),
-                  bottomTitles: AxisTitles(
-                    sideTitles: SideTitles(
-                      showTitles: true,
-                      reservedSize: 26,
-                      getTitlesWidget: (v, m) {
-                        final h = v.toInt();
-                        if (h % 2 != 0 && horas.length > 12) return const SizedBox.shrink();
-                        return Padding(
-                          padding: const EdgeInsets.only(top: 6),
-                          child: Text(
-                            '${h}h',
-                            style: TextStyle(fontSize: _modoTV ? 11 : 10, fontWeight: FontWeight.w700),
+    final maxComMargem = maxVal * 1.15;
+    final tetoTicks = ((maxComMargem / interval).ceil() * interval).toDouble();
+    final maxY = tetoTicks + (interval * 0.12);
+
+    return LayoutBuilder(builder: (context, constraints) {
+      final leftReserved = isMobile ? 46.0 : (_modoTV ? 62.0 : 52.0);
+      final rightReserved = isMobile ? 12.0 : (_modoTV ? 18.0 : 14.0);
+      final areaUtil = (constraints.maxWidth - (leftReserved + rightReserved + 16)).clamp(150.0, 5000.0);
+      final slotWidth = areaUtil / (horas.isEmpty ? 1 : horas.length);
+      final rodWidth = (slotWidth * (isMobile ? 0.60 : 0.60)).clamp(3.5, _modoTV ? 16.0 : 13.0);
+
+      return _boxGrafico(
+        titulo: 'Viagens por Faixa Horária (0h às 23h)',
+        subtitulo: _linhaSelecionada == null ? 'Soma de todas as linhas' : 'Operação da Linha $_linhaSelecionada',
+        legenda: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _bolinhaLegenda(const Color(0xFFE11D48), 'Pico'),
+            const SizedBox(width: 8),
+            _bolinhaLegenda(const Color(0xFF475569), 'Normal'),
+          ],
+        ),
+        child: horas.isEmpty
+            ? const Center(child: Text('Sem dados de faixa horária.'))
+            : Padding(
+                padding: const EdgeInsets.only(top: 8.0, left: 4, right: 6),
+                child: BarChart(
+                  BarChartData(
+                    maxY: maxY,
+                    borderData: FlBorderData(show: false),
+                    gridData: const FlGridData(drawVerticalLine: false),
+                    barTouchData: _tooltipPadrao(),
+                    barGroups: horas.map((h) {
+                      final pico = (h >= 6 && h <= 8) || (h >= 17 && h <= 19);
+                      return BarChartGroupData(
+                        x: h,
+                        barRods: [
+                          BarChartRodData(
+                            toY: viagensPorHora[h]!,
+                            color: pico ? const Color(0xFFE11D48) : const Color(0xFF475569),
+                            width: rodWidth,
+                            borderRadius: BorderRadius.circular(2.0),
                           ),
-                        );
-                      },
+                        ],
+                      );
+                    }).toList(),
+                    titlesData: FlTitlesData(
+                      rightTitles: AxisTitles(
+                        sideTitles: SideTitles(
+                          showTitles: true,
+                          reservedSize: rightReserved,
+                          getTitlesWidget: _emptyAxisTitle,
+                        ),
+                      ),
+                      topTitles: AxisTitles(
+                        sideTitles: SideTitles(
+                          showTitles: true,
+                          reservedSize: _modoTV ? 20 : 16,
+                          getTitlesWidget: _emptyAxisTitle,
+                        ),
+                      ),
+                      leftTitles: AxisTitles(
+                        sideTitles: SideTitles(
+                          showTitles: true,
+                          interval: interval,
+                          reservedSize: leftReserved,
+                          getTitlesWidget: (v, m) {
+                            if (v > tetoTicks + 0.001) return const SizedBox.shrink();
+                            return SideTitleWidget(
+                              meta: m,
+                              space: isMobile ? 3 : 6,
+                              child: Text(
+                                _fmtMilhar(v),
+                                textAlign: TextAlign.end,
+                                style: TextStyle(
+                                  fontSize: isMobile ? 9 : (_modoTV ? 12 : 10),
+                                  color: _modoTV ? const Color(0xFF334155) : Colors.blueGrey,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                      bottomTitles: AxisTitles(
+                        sideTitles: SideTitles(
+                          showTitles: true,
+                          reservedSize: isMobile ? 26 : (_modoTV ? 32 : 26),
+                          getTitlesWidget: (v, m) {
+                            final h = v.toInt();
+                            if (isMobile && h % 4 != 0) return const SizedBox.shrink();
+                            if (!isMobile && h % 2 != 0 && horas.length > 12) return const SizedBox.shrink();
+
+                            return SideTitleWidget(
+                              meta: m,
+                              space: 4,
+                              child: Text(
+                                '${h}h',
+                                style: TextStyle(
+                                  fontSize: isMobile ? 10 : (_modoTV ? 12 : 10),
+                                  fontWeight: FontWeight.w800,
+                                  color: const Color(0xFF0F172A),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-    );
+      );
+    });
   }
 
   Widget _buildGraficoTurnosERanking(
@@ -2047,6 +2321,8 @@ class _DashboardPageState extends State<DashboardPage> {
     List<FaixaHorariaItem> fxHr,
     List<ResumoDiario> resumos,
   ) {
+    final isMobile = MediaQuery.of(context).size.width < 700;
+
     int manhaP = 0, manhaR = 0, tardeP = 0, tardeR = 0, noiteP = 0, noiteR = 0;
     for (final item in fcv) {
       manhaP += item.manhaProg;
@@ -2057,7 +2333,6 @@ class _DashboardPageState extends State<DashboardPage> {
       noiteR += item.noiteRealiz;
     }
 
-    // Se a coleção de FCV não contiver divisões de turnos, calcula a partir das faixas horárias reais:
     if (manhaR == 0 && tardeR == 0 && noiteR == 0 && fxHr.isNotEmpty) {
       for (final item in fxHr) {
         if (item.hora >= 5 && item.hora < 12) {
@@ -2087,104 +2362,121 @@ class _DashboardPageState extends State<DashboardPage> {
     }
     final topLinhas = viagensPorLinha.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
 
+    final turnosWidget = Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        _barraProgressoTurno('Manhã', manhaR, manhaP, const Color(0xFFF59E0B)),
+        SizedBox(height: _modoTV ? 18 : 14),
+        _barraProgressoTurno('Tarde', tardeR, tardeP, const Color(0xFFEA580C)),
+        SizedBox(height: _modoTV ? 18 : 14),
+        _barraProgressoTurno('Noite', noiteR, noiteP, const Color(0xFF312E81)),
+      ],
+    );
+
+    final rankingWidget = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Top Linhas (Partidas)',
+          style: TextStyle(
+            fontSize: _modoTV ? 14 : 11,
+            fontWeight: FontWeight.w800,
+            color: _modoTV ? const Color(0xFF334155) : Colors.blueGrey,
+          ),
+        ),
+        SizedBox(height: _modoTV ? 10 : 8),
+        if (topLinhas.isEmpty)
+          const Center(child: Text('Sem dados'))
+        else
+          ...topLinhas.take(5).map((item) {
+            final maxLinha = topLinhas.first.value;
+            final ratio = maxLinha > 0 ? item.value / maxLinha : 0.0;
+            return Padding(
+              padding: EdgeInsets.only(bottom: _modoTV ? 10.0 : 8.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        'Linha ${item.key}',
+                        style: TextStyle(fontSize: _modoTV ? 14 : 11, fontWeight: FontWeight.bold),
+                      ),
+                      Text(
+                        '${item.value} viag.',
+                        style: TextStyle(
+                          fontSize: _modoTV ? 13 : 10,
+                          color: _modoTV ? const Color(0xFF475569) : Colors.blueGrey,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: LinearProgressIndicator(
+                      value: ratio,
+                      minHeight: _modoTV ? 10 : 6,
+                      backgroundColor: const Color(0xFFE2E8F0),
+                      color: const Color(0xFF0284C7),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }),
+      ],
+    );
+
     return _boxGrafico(
       titulo: 'Turnos (FCV) & Linhas Mais Ativas',
       subtitulo: 'Cumprimento Manhã/Tarde/Noite + Top Linhas',
-      child: Row(
-        children: [
-          Expanded(
-            flex: 5,
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
+      height: isMobile ? 480 : (_modoTV ? 370 : 310),
+      child: isMobile
+          ? Column(
               children: [
-                _barraProgressoTurno('Manhã', manhaR, manhaP, const Color(0xFFF59E0B)),
-                const SizedBox(height: 14),
-                _barraProgressoTurno('Tarde', tardeR, tardeP, const Color(0xFFEA580C)),
-                const SizedBox(height: 14),
-                _barraProgressoTurno('Noite', noiteR, noiteP, const Color(0xFF312E81)),
+                turnosWidget,
+                const Divider(height: 28),
+                rankingWidget,
+              ],
+            )
+          : Row(
+              children: [
+                Expanded(flex: 5, child: turnosWidget),
+                const VerticalDivider(width: 24),
+                Expanded(flex: 5, child: rankingWidget),
               ],
             ),
-          ),
-          const VerticalDivider(width: 24),
-          Expanded(
-            flex: 5,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Top Linhas (Partidas)',
-                  style: TextStyle(fontSize: _modoTV ? 12 : 11, fontWeight: FontWeight.bold, color: Colors.blueGrey),
-                ),
-                const SizedBox(height: 8),
-                Expanded(
-                  child: topLinhas.isEmpty
-                      ? const Center(child: Text('Sem dados'))
-                      : ListView.builder(
-                          itemCount: topLinhas.take(5).length,
-                          itemBuilder: (ctx, i) {
-                            final item = topLinhas[i];
-                            final maxLinha = topLinhas.first.value;
-                            final ratio = maxLinha > 0 ? item.value / maxLinha : 0.0;
-                            return Padding(
-                              padding: const EdgeInsets.only(bottom: 8.0),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Row(
-                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                    children: [
-                                      Text(
-                                        'Linha ${item.key}',
-                                        style: TextStyle(fontSize: _modoTV ? 12 : 11, fontWeight: FontWeight.bold),
-                                      ),
-                                      Text(
-                                        '${item.value} viag.',
-                                        style: TextStyle(fontSize: _modoTV ? 11 : 10, color: Colors.blueGrey, fontWeight: FontWeight.w600),
-                                      ),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 3),
-                                  ClipRRect(
-                                    borderRadius: BorderRadius.circular(4),
-                                    child: LinearProgressIndicator(
-                                      value: ratio,
-                                      minHeight: _modoTV ? 8 : 6,
-                                      backgroundColor: const Color(0xFFE2E8F0),
-                                      color: const Color(0xFF0284C7),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            );
-                          },
-                        ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
     );
   }
 
   Widget _barraProgressoTurno(String turno, int realiz, int prog, Color cor) {
+    final isMobile = MediaQuery.of(context).size.width < 700 || MediaQuery.of(context).size.height < 550;
     final perc = prog > 0 ? (realiz / prog) * 100 : 0.0;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(turno, style: TextStyle(fontWeight: FontWeight.bold, fontSize: _modoTV ? 13 : 12)),
-            Text('${perc.toStringAsFixed(1)}%', style: TextStyle(fontWeight: FontWeight.bold, fontSize: _modoTV ? 12 : 11, color: cor)),
+            Text(turno, style: TextStyle(fontWeight: FontWeight.bold, fontSize: _modoTV ? 15 : (isMobile ? 12 : 12))),
+            Text('${perc.toStringAsFixed(1)}%',
+                style: TextStyle(
+                  fontWeight: FontWeight.w900,
+                  fontSize: _modoTV ? 15 : (isMobile ? 12 : 11),
+                  color: cor,
+                )),
           ],
         ),
-        const SizedBox(height: 4),
+        const SizedBox(height: 5),
         ClipRRect(
           borderRadius: BorderRadius.circular(6),
           child: LinearProgressIndicator(
             value: (perc / 100).clamp(0.0, 1.0),
-            minHeight: _modoTV ? 12 : 10,
+            minHeight: _modoTV ? 16 : 10,
             backgroundColor: const Color(0xFFE2E8F0),
             color: cor,
           ),
@@ -2194,84 +2486,190 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   Widget _barChartDuplo({
+    required ScrollController controller,
     required List<String> labels,
     required List<double> valoresA,
     required List<double> valoresB,
     required Color corA,
     required Color corB,
   }) {
+    final isMobile = MediaQuery.of(context).size.width < 700 || MediaQuery.of(context).size.height < 550;
+
     double maxVal = 10;
     for (final v in [...valoresA, ...valoresB]) {
       if (v > maxVal) maxVal = v;
     }
     final interval = _calcularIntervalo(maxVal);
-    final maxY = (((maxVal * 1.22) / interval).ceil() * interval).toDouble();
+
+    final maxComMargem = maxVal * 1.15;
+    final tetoTicks = ((maxComMargem / interval).ceil() * interval).toDouble();
+    final maxY = tetoTicks + (interval * 0.12);
 
     return LayoutBuilder(
       builder: (context, constraints) {
         final larguraMin = constraints.maxWidth;
-        final larguraCalculada = (labels.length * 52.0).clamp(larguraMin, 3000.0);
+        final leftReserved = isMobile ? 46.0 : (_modoTV ? 62.0 : 52.0);
+        final rightReserved = isMobile ? 12.0 : (_modoTV ? 18.0 : 14.0);
 
-        return SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: SizedBox(
-            width: larguraCalculada,
-            child: BarChart(
-              BarChartData(
-                maxY: maxY,
-                borderData: FlBorderData(show: false),
-                gridData: const FlGridData(drawVerticalLine: false),
-                barTouchData: _tooltipPadrao(),
-                barGroups: List.generate(labels.length, (i) {
-                  return BarChartGroupData(
-                    x: i,
-                    barsSpace: 4,
-                    barRods: [
-                      BarChartRodData(
-                        toY: valoresA[i],
-                        color: corA,
-                        width: labels.length <= 7 ? 16 : 10,
-                        borderRadius: BorderRadius.circular(3),
-                      ),
-                      BarChartRodData(
-                        toY: valoresB[i],
-                        color: corB,
-                        width: labels.length <= 7 ? 16 : 10,
-                        borderRadius: BorderRadius.circular(3),
-                      ),
-                    ],
-                  );
-                }),
-                titlesData: FlTitlesData(
-                  rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                  topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                  leftTitles: AxisTitles(
-                    sideTitles: SideTitles(
-                      showTitles: true,
-                      interval: interval,
-                      reservedSize: 44,
-                      getTitlesWidget: (v, m) => Text(
-                        _fmtMilhar(v),
-                        style: TextStyle(fontSize: _modoTV ? 11 : 10, color: Colors.blueGrey, fontWeight: FontWeight.w600),
-                      ),
-                    ),
+        if (_verMesTodo && controller.hasClients && controller.offset != 0) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (controller.hasClients) controller.jumpTo(0);
+          });
+        }
+
+        double larguraCalculada;
+        double rodWidth;
+        double barsSpace;
+
+        if (_verMesTodo) {
+          larguraCalculada = larguraMin;
+          final areaUtil = (larguraMin - (leftReserved + rightReserved + 16)).clamp(150.0, 5000.0);
+          final espacoPorItem = areaUtil / (labels.isEmpty ? 1 : labels.length);
+          rodWidth = (espacoPorItem * 0.30).clamp(2.5, 14.0);
+          barsSpace = (espacoPorItem * 0.08).clamp(1.0, 4.0);
+        } else {
+          larguraCalculada = (labels.length * (isMobile ? 48.0 : (_modoTV ? 62.0 : 54.0)) + 60.0)
+              .clamp(larguraMin, 4000.0);
+          rodWidth = isMobile ? 10.0 : (_modoTV ? 18.0 : 13.0);
+          barsSpace = isMobile ? 2.5 : 4.0;
+        }
+
+        final larguraAreaLabels = larguraCalculada - (leftReserved + rightReserved + 16);
+        final maxLabelsQueCabem = (larguraAreaLabels / (isMobile ? 38.0 : 52.0)).floor().clamp(2, 35);
+        final stepDatas = (labels.length / maxLabelsQueCabem).ceil().clamp(1, 15);
+
+        final chartWidget = BarChart(
+          BarChartData(
+            maxY: maxY,
+            borderData: FlBorderData(show: false),
+            gridData: const FlGridData(drawVerticalLine: false),
+            barTouchData: _tooltipPadrao(),
+            barGroups: List.generate(labels.length, (i) {
+              return BarChartGroupData(
+                x: i,
+                barsSpace: barsSpace,
+                barRods: [
+                  BarChartRodData(
+                    toY: valoresA[i],
+                    color: corA,
+                    width: rodWidth,
+                    borderRadius: BorderRadius.circular(2.0),
                   ),
-                  bottomTitles: AxisTitles(
-                    sideTitles: SideTitles(
-                      showTitles: true,
-                      reservedSize: 26,
-                      getTitlesWidget: (v, m) {
-                        final idx = v.toInt();
-                        if (idx < 0 || idx >= labels.length) return const SizedBox.shrink();
-                        return Padding(
-                          padding: const EdgeInsets.only(top: 6),
-                          child: Text(
-                            labels[idx],
-                            style: TextStyle(fontSize: _modoTV ? 11 : 10, fontWeight: FontWeight.w700),
-                          ),
-                        );
-                      },
-                    ),
+                  BarChartRodData(
+                    toY: valoresB[i],
+                    color: corB,
+                    width: rodWidth,
+                    borderRadius: BorderRadius.circular(2.0),
+                  ),
+                ],
+              );
+            }),
+            titlesData: FlTitlesData(
+              topTitles: AxisTitles(
+                sideTitles: SideTitles(
+                  showTitles: true,
+                  reservedSize: _modoTV ? 20 : 16,
+                  getTitlesWidget: _emptyAxisTitle,
+                ),
+              ),
+              rightTitles: AxisTitles(
+                sideTitles: SideTitles(
+                  showTitles: true,
+                  reservedSize: rightReserved,
+                  getTitlesWidget: _emptyAxisTitle,
+                ),
+              ),
+              leftTitles: AxisTitles(
+                sideTitles: SideTitles(
+                  showTitles: true,
+                  interval: interval,
+                  reservedSize: leftReserved,
+                  getTitlesWidget: (v, m) {
+                    if (v > tetoTicks + 0.001) return const SizedBox.shrink();
+                    return SideTitleWidget(
+                      meta: m,
+                      space: isMobile ? 3 : 6,
+                      child: Text(
+                        _fmtMilhar(v),
+                        textAlign: TextAlign.end,
+                        style: TextStyle(
+                          fontSize: isMobile ? 9 : (_modoTV ? 12 : 10),
+                          color: _modoTV ? const Color(0xFF334155) : Colors.blueGrey,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+              bottomTitles: AxisTitles(
+                sideTitles: SideTitles(
+                  showTitles: true,
+                  reservedSize: isMobile ? 26 : (_modoTV ? 32 : 26),
+                  getTitlesWidget: (v, m) {
+                    final idx = v.toInt();
+                    if (idx < 0 || idx >= labels.length) return const SizedBox.shrink();
+
+                    if (stepDatas > 1 && idx % stepDatas != 0 && idx != labels.length - 1) {
+                      return const SizedBox.shrink();
+                    }
+
+                    return SideTitleWidget(
+                      meta: m,
+                      space: 4,
+                      child: Text(
+                        labels[idx],
+                        style: TextStyle(
+                          fontSize: isMobile ? 9 : (_modoTV ? 12 : 10),
+                          fontWeight: FontWeight.w800,
+                          color: const Color(0xFF0F172A),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+          ),
+        );
+
+        if (_verMesTodo) {
+          return Padding(
+            padding: const EdgeInsets.only(top: 8.0, left: 4, right: 6),
+            child: chartWidget,
+          );
+        }
+
+        return Listener(
+          onPointerSignal: (pointerSignal) {
+            if (pointerSignal is PointerScrollEvent) {
+              final delta = pointerSignal.scrollDelta.dy != 0
+                  ? pointerSignal.scrollDelta.dy
+                  : pointerSignal.scrollDelta.dx;
+              final novoOffset = (controller.offset + delta).clamp(
+                0.0,
+                controller.position.maxScrollExtent,
+              );
+              controller.jumpTo(novoOffset);
+            }
+          },
+          child: Scrollbar(
+            controller: controller,
+            thumbVisibility: larguraCalculada > larguraMin,
+            interactive: true,
+            thickness: 5,
+            radius: const Radius.circular(3),
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: SingleChildScrollView(
+                controller: controller,
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.only(left: 6, right: 12),
+                child: SizedBox(
+                  width: larguraCalculada,
+                  child: Padding(
+                    padding: const EdgeInsets.only(top: 8.0),
+                    child: chartWidget,
                   ),
                 ),
               ),
@@ -2283,6 +2681,8 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   BarTouchData _tooltipPadrao() {
+    final isMobile = MediaQuery.of(context).size.width < 700 || MediaQuery.of(context).size.height < 550;
+
     return BarTouchData(
       touchTooltipData: BarTouchTooltipData(
         fitInsideHorizontally: true,
@@ -2292,7 +2692,11 @@ class _DashboardPageState extends State<DashboardPage> {
         getTooltipItem: (group, groupIndex, rod, rodIndex) {
           return BarTooltipItem(
             _fmtInt(rod.toY.round()),
-            const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
+            TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.bold,
+              fontSize: _modoTV ? 14 : (isMobile ? 11 : 12),
+            ),
           );
         },
       ),
@@ -2304,42 +2708,82 @@ class _DashboardPageState extends State<DashboardPage> {
     required String subtitulo,
     Widget? legenda,
     required Widget child,
+    double? height,
   }) {
+    final isMobile = MediaQuery.of(context).size.width < 700 || MediaQuery.of(context).size.height < 550;
+
     return Container(
-      height: _modoTV ? 320 : 300,
-      padding: const EdgeInsets.all(14),
+      height: height ?? (_modoTV ? 370 : (isMobile ? 330 : 310)),
+      padding: EdgeInsets.all(_modoTV ? 16 : (isMobile ? 12 : 14)),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(10),
         border: Border.all(color: const Color(0xFFE2E8F0)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: _modoTV ? 0.04 : 0.02),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      titulo,
-                      style: TextStyle(
-                        fontSize: _modoTV ? 14 : 13,
-                        fontWeight: FontWeight.w800,
-                        color: const Color(0xFF0F172A),
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(subtitulo, style: const TextStyle(fontSize: 11, color: Colors.blueGrey)),
-                  ],
-                ),
+          if (isMobile) ...[
+            Text(
+              titulo,
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFF0F172A),
               ),
-              if (legenda != null) legenda,
+            ),
+            const SizedBox(height: 2),
+            Text(
+              subtitulo,
+              style: const TextStyle(
+                fontSize: 11,
+                color: Colors.blueGrey,
+              ),
+            ),
+            if (legenda != null) ...[
+              const SizedBox(height: 8),
+              legenda,
             ],
-          ),
-          const SizedBox(height: 14),
+          ] else ...[
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        titulo,
+                        style: TextStyle(
+                          fontSize: _modoTV ? 16 : 13,
+                          fontWeight: FontWeight.w800,
+                          color: const Color(0xFF0F172A),
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitulo,
+                        style: TextStyle(
+                          fontSize: _modoTV ? 13 : 11,
+                          color: _modoTV ? const Color(0xFF475569) : Colors.blueGrey,
+                          fontWeight: _modoTV ? FontWeight.w600 : FontWeight.normal,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (legenda != null) legenda,
+              ],
+            ),
+          ],
+          SizedBox(height: _modoTV ? 16 : (isMobile ? 8 : 12)),
           Expanded(child: child),
         ],
       ),
@@ -2350,18 +2794,30 @@ class _DashboardPageState extends State<DashboardPage> {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Container(width: 10, height: 10, decoration: BoxDecoration(color: cor, borderRadius: BorderRadius.circular(3))),
-        const SizedBox(width: 4),
-        Text(texto, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: Colors.blueGrey)),
+        Container(
+          width: _modoTV ? 12 : 10,
+          height: _modoTV ? 12 : 10,
+          decoration: BoxDecoration(color: cor, borderRadius: BorderRadius.circular(3)),
+        ),
+        const SizedBox(width: 5),
+        Text(
+          texto,
+          style: TextStyle(
+            fontSize: _modoTV ? 12 : 10,
+            fontWeight: FontWeight.w700,
+            color: _modoTV ? const Color(0xFF334155) : Colors.blueGrey,
+          ),
+        ),
       ],
     );
   }
 
   Widget _buildTabelaResumo(List<ResumoDiario> resumos, List<PassageiroDiario> passageiros) {
+    final isMobile = MediaQuery.of(context).size.width < 700 || MediaQuery.of(context).size.height < 550;
     final mapPass = {for (var p in passageiros) p.data: p};
 
     return Container(
-      padding: const EdgeInsets.all(14),
+      padding: EdgeInsets.all(_modoTV ? 16 : (isMobile ? 12 : 14)),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(10),
@@ -2374,58 +2830,71 @@ class _DashboardPageState extends State<DashboardPage> {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(
-                'Espelho Diário Consolidado (Operação + Bilhetagem)',
+                'Espelho Diário Consolidado',
                 style: TextStyle(
-                  fontSize: _modoTV ? 14 : 13,
+                  fontSize: _modoTV ? 16 : 13,
                   fontWeight: FontWeight.w800,
                   color: const Color(0xFF0F172A),
                 ),
               ),
               Text(
-                '${resumos.length} registros',
-                style: const TextStyle(fontSize: 11, color: Colors.grey, fontWeight: FontWeight.bold),
+                '${resumos.length} reg.',
+                style: TextStyle(
+                  fontSize: _modoTV ? 13 : 11,
+                  color: Colors.grey.shade700,
+                  fontWeight: FontWeight.bold,
+                ),
               ),
             ],
           ),
-          const SizedBox(height: 10),
+          SizedBox(height: _modoTV ? 14 : 10),
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: DataTable(
+              dataRowMinHeight: _modoTV ? 46 : 38,
+              dataRowMaxHeight: _modoTV ? 54 : 44,
+              headingRowHeight: _modoTV ? 48 : 42,
               headingRowColor: WidgetStateProperty.all(const Color(0xFFF8FAFC)),
-              columns: const [
-                DataColumn(label: Text('Data', style: TextStyle(fontWeight: FontWeight.bold))),
-                DataColumn(label: Text('Dia da Semana', style: TextStyle(fontWeight: FontWeight.bold))),
-                DataColumn(label: Text('Frota', style: TextStyle(fontWeight: FontWeight.bold))),
-                DataColumn(label: Text('Viagens Prog.', style: TextStyle(fontWeight: FontWeight.bold))),
-                DataColumn(label: Text('Viagens Realiz.', style: TextStyle(fontWeight: FontWeight.bold))),
-                DataColumn(label: Text('Dif.', style: TextStyle(fontWeight: FontWeight.bold))),
-                DataColumn(label: Text('KM Total', style: TextStyle(fontWeight: FontWeight.bold))),
-                DataColumn(label: Text('Catraca', style: TextStyle(fontWeight: FontWeight.bold))),
-                DataColumn(label: Text('Gratuitos', style: TextStyle(fontWeight: FontWeight.bold))),
-                DataColumn(label: Text('Total Passageiros', style: TextStyle(fontWeight: FontWeight.bold))),
+              columns: [
+                _colunaHeader('Data'),
+                _colunaHeader('Dia da Semana'),
+                _colunaHeader('Frota'),
+                _colunaHeader('Viagens Prog.'),
+                _colunaHeader('Viagens Realiz.'),
+                _colunaHeader('Dif.'),
+                _colunaHeader('KM Total'),
+                _colunaHeader('Catraca'),
+                _colunaHeader('Gratuitos'),
+                _colunaHeader('Total Passageiros'),
               ],
               rows: resumos.map((r) {
                 final p = mapPass[r.data];
+                final cellStyle = TextStyle(
+                  fontSize: _modoTV ? 13 : 12,
+                  fontWeight: _modoTV ? FontWeight.w600 : FontWeight.normal,
+                );
+
                 return DataRow(
                   cells: [
-                    DataCell(Text(r.data, style: const TextStyle(fontWeight: FontWeight.w600))),
-                    DataCell(Text(_nomesLongoDia[r.weekday] ?? '')),
-                    DataCell(Text('${r.veiculos} veíc.')),
-                    DataCell(Text(_fmtInt(r.viagensProg))),
-                    DataCell(Text(_fmtInt(r.viagensRealiz))),
+                    DataCell(Text(r.data, style: cellStyle.copyWith(fontWeight: FontWeight.w700))),
+                    DataCell(Text(_nomesLongoDia[r.weekday] ?? '', style: cellStyle)),
+                    DataCell(Text('${r.veiculos} veíc.', style: cellStyle)),
+                    DataCell(Text(_fmtInt(r.viagensProg), style: cellStyle)),
+                    DataCell(Text(_fmtInt(r.viagensRealiz), style: cellStyle)),
                     DataCell(Text(
                       r.difViagens == 0 ? '0' : '-${r.difViagens}',
                       style: TextStyle(
+                        fontSize: _modoTV ? 13 : 12,
                         color: r.difViagens == 0 ? Colors.green.shade700 : Colors.red.shade700,
-                        fontWeight: FontWeight.bold,
+                        fontWeight: FontWeight.w800,
                       ),
                     )),
-                    DataCell(Text('${r.kmTotal.toStringAsFixed(1)} km')),
-                    DataCell(Text(p != null ? _fmtInt(p.catraca) : '-')),
-                    DataCell(Text(p != null ? _fmtInt(p.naoPagantes) : '-')),
+                    DataCell(Text('${r.kmTotal.toStringAsFixed(1)} km', style: cellStyle)),
+                    DataCell(Text(p != null ? _fmtInt(p.catraca) : '-', style: cellStyle)),
+                    DataCell(Text(p != null ? _fmtInt(p.naoPagantes) : '-', style: cellStyle)),
                     DataCell(Text(
                       p != null ? _fmtInt(p.totalPassageiros) : '-',
-                      style: const TextStyle(fontWeight: FontWeight.bold),
+                      style: cellStyle.copyWith(fontWeight: FontWeight.w800),
                     )),
                   ],
                 );
@@ -2433,6 +2902,19 @@ class _DashboardPageState extends State<DashboardPage> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  DataColumn _colunaHeader(String rotulo) {
+    return DataColumn(
+      label: Text(
+        rotulo,
+        style: TextStyle(
+          fontWeight: FontWeight.w800,
+          fontSize: _modoTV ? 13 : 12,
+          color: const Color(0xFF1E293B),
+        ),
       ),
     );
   }
