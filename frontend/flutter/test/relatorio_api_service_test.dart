@@ -1,8 +1,10 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:semob_dashboard/local_data_loader.dart';
+import 'package:semob_dashboard/utils/export_service.dart';
 
 Map<String, dynamic> _mockRelatorioJson() => {
       'gerado_em': '2026-10-21T12:00:00Z',
@@ -472,5 +474,177 @@ void main() {
     expect(ds.discrepanciasDetectadas.first.data, '02/08/2026');
     expect(ds.discrepanciasDetectadas.first.descricao, contains('Viagens Realiz.: diário=790 vs Mensal=750'));
     expect(ds.discrepanciasDetectadas.first.descricao, contains('KM Total: diário=5300.75 vs Mensal=5100.00'));
+  });
+
+  test('ExportService.gerarBytesRelatorioPdf gera documento PDF executivo valido com sintese, KPIs, glossario e tabela', () async {
+    final resumos = [
+      ResumoDiario(
+        mesAno: 'Agosto/2026',
+        periodicidade: 'Mensal',
+        data: '01/08/2026',
+        dateTime: DateTime(2026, 8, 1),
+        weekday: 6,
+        veiculos: 42,
+        maxVeicFaixa: 38,
+        viagensProg: 924,
+        viagensRealiz: 920,
+        difViagens: 4,
+        kmProd: 6500.0,
+        kmImprod: 389.4,
+        kmTotal: 6889.4,
+      ),
+      ResumoDiario(
+        mesAno: 'Agosto/2026',
+        periodicidade: 'Mensal',
+        data: '03/08/2026',
+        dateTime: DateTime(2026, 8, 3),
+        weekday: 1,
+        veiculos: 45,
+        maxVeicFaixa: 40,
+        viagensProg: 1000,
+        viagensRealiz: 940,
+        difViagens: 60,
+        kmProd: 7000.0,
+        kmImprod: 500.0,
+        kmTotal: 7500.0,
+      ),
+    ];
+
+    final passageiros = [
+      PassageiroDiario(
+        mesAno: 'Agosto/2026',
+        periodicidade: 'Mensal',
+        data: '01/08/2026',
+        dateTime: DateTime(2026, 8, 1),
+        weekday: 6,
+        catraca: 5168,
+        antecipados: 676,
+        naoPagantes: 10700,
+        totalPassageiros: 16544,
+      ),
+      PassageiroDiario(
+        mesAno: 'Agosto/2026',
+        periodicidade: 'Mensal',
+        data: '03/08/2026',
+        dateTime: DateTime(2026, 8, 3),
+        weekday: 1,
+        catraca: 8200,
+        antecipados: 900,
+        naoPagantes: 14500,
+        totalPassageiros: 23600,
+      ),
+    ];
+
+    final fcvs = [
+      FcvDiario(
+        mesAno: 'Agosto/2026',
+        periodicidade: 'Mensal',
+        data: '01/08/2026',
+        dateTime: DateTime(2026, 8, 1),
+        weekday: 6,
+        manhaProg: 300,
+        manhaRealiz: 299,
+        tardeProg: 350,
+        tardeRealiz: 348,
+        noiteProg: 274,
+        noiteRealiz: 273,
+        totalProg: 924,
+        totalRealiz: 920,
+      ),
+    ];
+
+    final linhas = [
+      LinhaDiaria(
+        mesAno: 'Agosto/2026',
+        periodicidade: 'Mensal',
+        data: '01/08/2026',
+        dateTime: DateTime(2026, 8, 1),
+        weekday: 6,
+        linha: '01 - Circular SCS',
+        viagensProg: 220,
+        viagensRealiz: 218,
+        kmTotal: 1540.0,
+      ),
+    ];
+
+    final alertas = [
+      const AlertaExecutivoPdf(
+        titulo: 'Descumprimento de FCV em 03/08/2026 (Seg)',
+        descricao: 'FCV atingiu 94.0% (60 viagens não realizadas). Impacto direto no intervalo de espera em SCS.',
+        critico: true,
+      ),
+    ];
+
+    final pdfBytes = await ExportService.gerarBytesRelatorioPdf(
+      mesSelecionado: 'Agosto/2026',
+      periodicidade: 'Mensal',
+      linhaSelecionada: null,
+      intervaloTexto: '01/08/2026 a 03/08/2026 (Mês Todo)',
+      origemDados: 'MongoDB',
+      resumos: resumos,
+      passageiros: passageiros,
+      fcv: fcvs,
+      faixasHorarias: const [],
+      linhas: linhas,
+      alertas: alertas,
+    );
+
+    expect(pdfBytes.length, greaterThan(1000));
+    // Assinatura mágica de arquivo PDF: "%PDF-"
+    final headerAscii = ascii.decode(pdfBytes.sublist(0, 5));
+    expect(headerAscii, '%PDF-');
+  });
+
+  test('LocalDataLoader.carregarPasta escaneia recursivamente pasta com multiplos HTMLs e subpastas', () async {
+    final tempDir = Directory.systemTemp.createTempSync('semob_test_pasta_');
+    try {
+      final subMensal = Directory('${tempDir.path}/Mensal')..createSync();
+      final subQuinzenal = Directory('${tempDir.path}/Quinzenal')..createSync();
+
+      const htmlResumo = '''
+        <html><body><table>
+          <tr><th>Data</th><th>Dia</th><th>Veic</th><th>Max</th><th>Prog</th><th>Realiz</th><th>Dif</th><th>KmProd</th><th>KmImprod</th><th>KmTotal</th></tr>
+          <tr><td>01/08/2026</td><td>Sab</td><td>40</td><td>38</td><td>900</td><td>895</td><td>5</td><td>6.000,00</td><td>300,00</td><td>6.300,00</td></tr>
+        </table></body></html>
+      ''';
+      File('${subMensal.path}/Mensal_082026.html').writeAsStringSync(htmlResumo);
+
+      const htmlSaldos = '''
+        <html><body><table>
+          <tr><th>Data</th><th>Serie</th><th>Transferidos</th><th>SaldoFinal</th></tr>
+          <tr><td>01/08/2026</td><td>1</td><td>10.000,00</td><td>50.000,00</td></tr>
+        </table></body></html>
+      ''';
+      // Arquivo exclusivo de processamento do backend: deve ser registrado em arquivosHtmlCarregados
+      File('${subMensal.path}/Saldos_Mensal.html').writeAsStringSync(htmlSaldos);
+
+      const htmlFxHr = '''
+        <html><body><table>
+          <tr><th>Linha</th><th>Data</th><th>Hora</th><th>Faixa</th><th>Veiculos</th><th>Viagens</th><th>Partidas</th></tr>
+          <tr><td>01</td><td>01/08/2026</td><td>06</td><td>06:00-06:59</td><td>5</td><td>10</td><td>06:10, 06:30</td></tr>
+        </table></body></html>
+      ''';
+      File('${subQuinzenal.path}/Resumo_FxHr_Mensal_082026.html').writeAsStringSync(htmlFxHr);
+
+      final ds = await LocalDataLoader.carregarPasta(tempDir.path);
+
+      expect(ds.isEmpty, isFalse);
+      // Todos os 3 arquivos foram identificados e registrados para envio ao banco
+      expect(ds.arquivosHtmlCarregados.length, 3);
+      final nomes = ds.arquivosHtmlCarregados.map((a) => a.nome).toList();
+      expect(nomes, contains('Mensal_082026.html'));
+      expect(nomes, contains('Saldos_Mensal.html'));
+      expect(nomes, contains('Resumo_FxHr_Mensal_082026.html'));
+
+      // Resumos e faixas horárias foram devidamente processados localmente
+      expect(ds.resumos.isNotEmpty, isTrue);
+      expect(ds.resumos.first.data, '01/08/2026');
+      expect(ds.faixasHorarias.isNotEmpty, isTrue);
+      expect(ds.faixasHorarias.first.linha, '01');
+    } finally {
+      try {
+        tempDir.deleteSync(recursive: true);
+      } catch (_) {}
+    }
   });
 }

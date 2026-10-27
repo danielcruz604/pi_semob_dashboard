@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
@@ -8,6 +7,7 @@ import 'folder_scanner_io.dart' if (dart.library.html) 'folder_scanner_web.dart'
 import 'local_data_loader.dart';
 import 'login_page.dart';
 import 'services/api_service.dart';
+import 'utils/export_service.dart';
 
 enum ModoAnalise { extratoPeriodo, compararDiasSemana }
 
@@ -151,19 +151,12 @@ class _DashboardPageState extends State<DashboardPage> {
       if (ok) salvos++;
     }
 
-    // Se o usuário selecionou arquivos exclusivos do backend (ex.: Saldos ou Ocorrências)
-    // e não havia gráficos locais em memória, sincroniza os dados recém-salvos do MongoDB:
-    final semGraficosLocais = _dataset.resumos.isEmpty &&
-        _dataset.passageiros.isEmpty &&
-        _dataset.fcv.isEmpty &&
-        _dataset.faixasHorarias.isEmpty &&
-        _dataset.linhas.isEmpty;
-    if (salvos > 0 && semGraficosLocais) {
+    // Sincroniza com os dados consolidados do MongoDB para integrar todos os tipos de relatórios
+    if (salvos > 0) {
       final datasetDoBanco = await _api.carregarDatasetDoBanco();
       if (datasetDoBanco != null && !datasetDoBanco.isEmpty) {
-        datasetDoBanco.arquivosHtmlCarregados.addAll(_dataset.arquivosHtmlCarregados);
-        datasetDoBanco.discrepanciasDetectadas.addAll(_dataset.discrepanciasDetectadas);
-        _aplicarDatasetCarregado(datasetDoBanco);
+        _mesclarDatasets(_dataset, datasetDoBanco);
+        _aplicarDatasetCarregado(_dataset);
       }
     }
 
@@ -190,76 +183,175 @@ class _DashboardPageState extends State<DashboardPage> {
     }
   }
 
+  void _mesclarDatasets(SemobDataset base, SemobDataset novos) {
+    for (final r in novos.resumos) {
+      final idx = base.resumos.indexWhere((e) => e.data == r.data && e.periodicidade == r.periodicidade);
+      if (idx < 0) {
+        base.resumos.add(r);
+      } else if (base.resumos[idx].calculadoViaDiario && !r.calculadoViaDiario) {
+        base.resumos[idx] = r;
+      }
+    }
+    for (final p in novos.passageiros) {
+      final idx = base.passageiros.indexWhere((e) => e.data == p.data && e.periodicidade == p.periodicidade);
+      if (idx < 0) {
+        base.passageiros.add(p);
+      } else if (base.passageiros[idx].calculadoViaDiario && !p.calculadoViaDiario) {
+        base.passageiros[idx] = p;
+      }
+    }
+    for (final f in novos.fcv) {
+      final idx = base.fcv.indexWhere((e) => e.data == f.data && e.periodicidade == f.periodicidade);
+      if (idx < 0) {
+        base.fcv.add(f);
+      } else if (base.fcv[idx].calculadoViaDiario && !f.calculadoViaDiario) {
+        base.fcv[idx] = f;
+      }
+    }
+    for (final fh in novos.faixasHorarias) {
+      if (!base.faixasHorarias.any((e) =>
+          e.data == fh.data && e.linha == fh.linha && e.hora == fh.hora && e.periodicidade == fh.periodicidade)) {
+        base.faixasHorarias.add(fh);
+      }
+    }
+    for (final l in novos.linhas) {
+      if (!base.linhas.any((e) => e.data == l.data && e.linha == l.linha && e.periodicidade == l.periodicidade)) {
+        base.linhas.add(l);
+      }
+    }
+    for (final a in novos.arquivosHtmlCarregados) {
+      if (!base.arquivosHtmlCarregados.any((e) => e.nome.toLowerCase() == a.nome.toLowerCase())) {
+        base.arquivosHtmlCarregados.add(a);
+      }
+    }
+    for (final d in novos.discrepanciasDetectadas) {
+      if (!base.discrepanciasDetectadas.any((e) => e.data == d.data && e.descricao == d.descricao)) {
+        base.discrepanciasDetectadas.add(d);
+      }
+    }
+  }
+
   /// Abre o seletor nativo de pastas no Windows, macOS, Linux, iOS e Android.
-  /// Na Web (Chrome/Edge), abre diretamente o seletor de múltiplos arquivos.
+  /// Na Web (Chrome/Edge), abre diretamente o seletor de múltiplos arquivos com dica de seleção total.
   Future<void> _selecionarPastaUnificada() async {
     if (kIsWeb) {
       await _selecionarMultiplosArquivos();
       return;
     }
 
-    if (defaultTargetPlatform == TargetPlatform.android) {
-      var status = await Permission.manageExternalStorage.status;
-      if (!status.isGranted) {
-        status = await Permission.manageExternalStorage.request();
+    try {
+      if (defaultTargetPlatform == TargetPlatform.android) {
+        var status = await Permission.manageExternalStorage.status;
+        if (!status.isGranted) {
+          status = await Permission.manageExternalStorage.request();
+        }
+        if (!status.isGranted) {
+          await Permission.storage.request();
+        }
       }
-      if (!status.isGranted) {
-        await Permission.storage.request();
+
+      final path = await FilePicker.getDirectoryPath(
+        dialogTitle: 'Selecione a pasta com os relatórios HTML da SEMOB',
+      );
+      if (path == null) return;
+
+      final nomeCurto = LocalDataLoader.extrairNomeCurtoPasta(path);
+
+      setState(() {
+        _carregando = true;
+        _origemCarregada = nomeCurto;
+        _statusUpload = 'Lendo e escaneando arquivos da pasta...';
+      });
+
+      final ds = await LocalDataLoader.carregarPasta(
+        path,
+        datasetExistente: _dataset.isEmpty ? null : _dataset,
+      );
+
+      if (ds.arquivosHtmlCarregados.isEmpty) {
+        if (mounted) {
+          setState(() {
+            _carregando = false;
+            _statusUpload = null;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Nenhum arquivo .HTML ou .HTM encontrado na pasta selecionada.'),
+              backgroundColor: Colors.orange,
+            ),
+          );
+        }
+        return;
+      }
+
+      if (ds.discrepanciasDetectadas.isNotEmpty) _alertasExpandidos = true;
+      _aplicarDatasetCarregado(ds);
+
+      await _enviarArquivosParaOBanco(ds.arquivosHtmlCarregados);
+    } catch (e) {
+      debugPrint('Falha ao processar pasta selecionada: $e');
+      if (mounted) {
+        setState(() {
+          _carregando = false;
+          _statusUpload = null;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Erro ao abrir pasta: $e'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
       }
     }
-
-    final path = await FilePicker.getDirectoryPath(
-      dialogTitle: 'Selecione a pasta de relatórios da SEMOB',
-    );
-    if (path == null) return;
-
-    final nomeCurto = LocalDataLoader.extrairNomeCurtoPasta(path);
-
-    setState(() {
-      _carregando = true;
-      _origemCarregada = nomeCurto;
-    });
-
-    final ds = await LocalDataLoader.carregarPasta(
-      path,
-      datasetExistente: _dataset.isEmpty ? null : _dataset,
-    );
-    if (ds.discrepanciasDetectadas.isNotEmpty) _alertasExpandidos = true;
-    _aplicarDatasetCarregado(ds);
-
-    await _enviarArquivosParaOBanco(ds.arquivosHtmlCarregados);
   }
 
   /// Seleção direta de múltiplos arquivos .HTML (Funciona em todas as 6 plataformas)
   Future<void> _selecionarMultiplosArquivos() async {
-    final result = await FilePicker.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['html', 'htm'],
-      dialogTitle: 'Selecione os arquivos HTML da SEMOB',
-    );
+    try {
+      final result = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['html', 'htm'],
+        dialogTitle: 'Selecione os arquivos HTML da SEMOB (pressione Ctrl+A para selecionar todos)',
+      );
 
-    if (result.isEmpty) return;
+      if (result.isEmpty) return;
 
-    final nomesNovos = result.map((f) => f.name.toLowerCase()).toSet();
+      final nomesNovos = result.map((f) => f.name.toLowerCase()).toSet();
 
-    setState(() {
-      _carregando = true;
-      _origemCarregada = result.length == 1
-          ? result.first.name
-          : '${_dataset.arquivosHtmlCarregados.length + result.length} arq.';
-    });
+      setState(() {
+        _carregando = true;
+        _origemCarregada = result.length == 1
+            ? result.first.name
+            : '${_dataset.arquivosHtmlCarregados.length + result.length} arq.';
+        _statusUpload = 'Processando ${result.length} arquivo(s)...';
+      });
 
-    final ds = await LocalDataLoader.carregarArquivosSelecionados(
-      result,
-      datasetExistente: _dataset.isEmpty ? null : _dataset,
-    );
-    if (ds.discrepanciasDetectadas.isNotEmpty) _alertasExpandidos = true;
-    _aplicarDatasetCarregado(ds);
+      final ds = await LocalDataLoader.carregarArquivosSelecionados(
+        result,
+        datasetExistente: _dataset.isEmpty ? null : _dataset,
+      );
+      if (ds.discrepanciasDetectadas.isNotEmpty) _alertasExpandidos = true;
+      _aplicarDatasetCarregado(ds);
 
-    final apenasNovos = ds.arquivosHtmlCarregados
-        .where((a) => nomesNovos.contains(a.nome.toLowerCase()))
-        .toList();
-    await _enviarArquivosParaOBanco(apenasNovos);
+      final apenasNovos = ds.arquivosHtmlCarregados
+          .where((a) => nomesNovos.contains(a.nome.toLowerCase()))
+          .toList();
+      await _enviarArquivosParaOBanco(apenasNovos);
+    } catch (e) {
+      debugPrint('Erro ao selecionar múltiplos arquivos: $e');
+      if (mounted) {
+        setState(() {
+          _carregando = false;
+          _statusUpload = null;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Erro ao carregar arquivos selecionados: $e'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    }
   }
 
   void _aplicarDatasetCarregado(SemobDataset ds) {
@@ -528,40 +620,58 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  Future<void> _exportarRelatorioCsv(
-    List<ResumoDiario> resumos,
-    List<PassageiroDiario> passageiros,
-  ) async {
-    final mapPass = {for (var p in passageiros) p.data: p};
-    final buffer = StringBuffer();
-
-    buffer.write('\uFEFF');
-    buffer.writeln('=== RELATÓRIO OPERACIONAL SEMOB • SÃO CAETANO DO SUL ===');
-    buffer.writeln('Escopo:;$_mesSelecionado - $_periodicidade;Linha:;${_linhaSelecionada ?? "Todas as Linhas"}');
-    buffer.writeln('Data de Extração:;${_fmtDataBR(DateTime.now())}');
-    buffer.writeln('Origem dos Dados:;${_origemCarregada ?? "Local"}');
-    buffer.writeln();
-    buffer.writeln(
-      'Data;Dia da Semana;Frota (Veíc.);Viagens Programadas;Viagens Realizadas;Diferença;FCV (%);KM Total;KM Improdutivo;Passageiros Catraca;Passageiros Gratuitos;Total Passageiros',
-    );
-
-    for (final r in resumos) {
-      final p = mapPass[r.data];
-      final fcv = r.viagensProg > 0 ? ((r.viagensRealiz / r.viagensProg) * 100).toStringAsFixed(2) : '100.00';
-      buffer.writeln(
-        '${r.data};${_nomesLongoDia[r.weekday] ?? ''};${r.veiculos};${r.viagensProg};${r.viagensRealiz};${r.difViagens};$fcv%;${r.kmTotal.toStringAsFixed(2)};${r.kmImprod.toStringAsFixed(2)};${p?.catraca ?? 0};${p?.naoPagantes ?? 0};${p?.totalPassageiros ?? 0}',
-      );
+  String _obterDescricaoIntervaloFiltro() {
+    if (_modoAtivo == ModoAnalise.extratoPeriodo) {
+      if (_dataInicio != null && _dataFim != null) {
+        return '${_fmtDataBR(_dataInicio!)} a ${_fmtDataBR(_dataFim!)} ($_presetPeriodo)';
+      }
+      return _presetPeriodo;
+    } else {
+      final nomeDia = _nomesLongoDia[_diaSemanaComparar] ?? 'Dia selecionado';
+      return 'Comparação de $nomeDia (${_datasMarcadasComparacao.length} datas)';
     }
+  }
 
+  Future<void> _exportarRelatorioExecutivoPdf({
+    required List<ResumoDiario> resumos,
+    required List<PassageiroDiario> passageiros,
+    required List<FcvDiario> fcvs,
+    required List<FaixaHorariaItem> faixasHorarias,
+    required List<LinhaDiaria> linhas,
+    required List<AlertaOutlier> outliers,
+  }) async {
     try {
-      final bytes = Uint8List.fromList(utf8.encode(buffer.toString()));
-      final nomeSugerido = 'relatorio_semob_${_mesSelecionado.replaceAll('/', '_')}_${_periodicidade.toLowerCase()}.csv';
+      final alertasPdf = outliers
+          .map((o) => AlertaExecutivoPdf(
+                titulo: o.titulo,
+                descricao: o.descricao,
+                critico: o.critico,
+              ))
+          .toList();
+
+      final bytes = await ExportService.gerarBytesRelatorioPdf(
+        mesSelecionado: _mesSelecionado,
+        periodicidade: _periodicidade,
+        linhaSelecionada: _linhaSelecionada,
+        intervaloTexto: _obterDescricaoIntervaloFiltro(),
+        origemDados: _origemCarregada ?? 'Memória Local',
+        resumos: resumos,
+        passageiros: passageiros,
+        fcv: fcvs,
+        faixasHorarias: faixasHorarias,
+        linhas: linhas,
+        alertas: alertasPdf,
+      );
+
+      final nomeSugerido =
+          'relatorio_executivo_semob_${_mesSelecionado.replaceAll('/', '_')}_${_periodicidade.toLowerCase()}.pdf';
 
       final caminhoSalvo = await FilePicker.saveFile(
-        dialogTitle: 'Exportar Relatório Operacional SEMOB (CSV)',
+        dialogTitle: 'Exportar Relatório Executivo SEMOB (PDF)',
         fileName: nomeSugerido,
         type: FileType.custom,
-        allowedExtensions: ['csv'],
+        allowedExtensions: ['pdf'],
+        mimeType: 'application/pdf',
         bytes: bytes,
       );
 
@@ -569,11 +679,11 @@ class _DashboardPageState extends State<DashboardPage> {
         await salvarBytesNoCaminho(caminhoSalvo.toFilePath(), bytes);
       }
 
-      if (mounted) {
+      if (mounted && (kIsWeb || caminhoSalvo != null)) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(caminhoSalvo != null ? 'Relatório exportado com sucesso!' : 'Exportação concluída.'),
-            backgroundColor: const Color(0xFF059669),
+          const SnackBar(
+            content: Text('Relatório Executivo em PDF gerado e salvo com sucesso!'),
+            backgroundColor: Color(0xFF059669),
           ),
         );
       }
@@ -581,7 +691,7 @@ class _DashboardPageState extends State<DashboardPage> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Erro ao exportar relatório: $e'),
+            content: Text('Erro ao gerar relatório PDF: $e'),
             backgroundColor: Colors.redAccent,
           ),
         );
@@ -744,21 +854,36 @@ class _DashboardPageState extends State<DashboardPage> {
           ),
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
-            child: ElevatedButton.icon(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF059669),
-                foregroundColor: Colors.white,
-                elevation: 0,
-                padding: const EdgeInsets.symmetric(horizontal: 11),
+            child: Tooltip(
+              message: 'Exporta Relatório Executivo em PDF com síntese, indicadores e glossário para superiores',
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF059669),
+                  foregroundColor: Colors.white,
+                  elevation: 0,
+                  padding: const EdgeInsets.symmetric(horizontal: 11),
+                ),
+                onPressed: _dataset.isEmpty
+                    ? null
+                    : () => _exportarRelatorioExecutivoPdf(
+                          resumos: resumosFiltrados,
+                          passageiros: passageirosFiltrados,
+                          fcvs: fcvFiltrados,
+                          faixasHorarias: fxHrFiltrados,
+                          linhas: linhasFiltradas,
+                          outliers: outliersDetectados,
+                        ),
+                icon: const Icon(Icons.picture_as_pdf_rounded, size: 16),
+                label: const Text('Exportar PDF', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
               ),
-              onPressed: _dataset.isEmpty ? null : () => _exportarRelatorioCsv(resumosFiltrados, passageirosFiltrados),
-              icon: const Icon(Icons.download_rounded, size: 16),
-              label: const Text('Exportar CSV', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
             ),
           ),
-          if (!kIsWeb)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+            child: Tooltip(
+              message: kIsWeb
+                  ? 'Selecionar múltiplos arquivos da pasta (selecione todos com Ctrl+A)'
+                  : 'Abre e escaneia recursivamente todos os relatórios HTML da pasta selecionada',
               child: ElevatedButton.icon(
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFF0284C7),
@@ -769,15 +894,18 @@ class _DashboardPageState extends State<DashboardPage> {
                 onPressed: _carregando ? null : _selecionarPastaUnificada,
                 icon: const Icon(Icons.folder_open_rounded, size: 16),
                 label: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 120),
+                  constraints: const BoxConstraints(maxWidth: 130),
                   child: Text(
-                    _origemCarregada == null ? 'Abrir Pasta' : _origemCarregada!,
+                    _origemCarregada == null
+                        ? (kIsWeb ? 'Carregar Pasta' : 'Abrir Pasta')
+                        : _origemCarregada!,
                     style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
               ),
             ),
+          ),
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
             child: OutlinedButton.icon(
@@ -931,20 +1059,19 @@ class _DashboardPageState extends State<DashboardPage> {
               runSpacing: 10,
               alignment: WrapAlignment.center,
               children: [
-                if (!kIsWeb)
-                  ElevatedButton.icon(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF0284C7),
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-                    ),
-                    onPressed: _selecionarPastaUnificada,
-                    icon: const Icon(Icons.folder_open),
-                    label: const Text('Selecionar Pasta'),
-                  ),
                 ElevatedButton.icon(
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: kIsWeb ? const Color(0xFF0284C7) : Colors.blueGrey.shade700,
+                    backgroundColor: const Color(0xFF0284C7),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                  ),
+                  onPressed: _selecionarPastaUnificada,
+                  icon: const Icon(Icons.folder_open),
+                  label: Text(kIsWeb ? 'Carregar Pasta (Lote)' : 'Selecionar Pasta'),
+                ),
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blueGrey.shade700,
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
                   ),
