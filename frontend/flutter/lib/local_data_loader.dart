@@ -366,11 +366,12 @@ class LocalDataLoader {
     final nome = nomeArquivo.toLowerCase().trim();
     if (!nome.endsWith('.html') && !nome.endsWith('.htm')) return false;
 
+    // Arquivos que são exclusivos do backend (microviagens pesadas, ocorrências contratuais, saldos bancários)
+    // são mantidos na lista de envio para o MongoDB, dispensando parsing gráfico local em Dart:
     if (nome.contains('_viagens') ||
         nome.contains('nrealiz') ||
         nome.contains('nterm') ||
         nome.contains('ninic') ||
-        nome.contains('resumo_fxhr') ||
         nome.contains('saldos')) {
       return false;
     }
@@ -379,11 +380,12 @@ class LocalDataLoader {
         nome.contains('fcv') ||
         nome.contains('fxhr') ||
         nome.contains('fx_hr') ||
-        nome.contains('linhas')) {
-      return true;
-    }
-
-    if (RegExp(r'(mensal|quinzenal)[_\s-]*\d{6}').hasMatch(nome)) {
+        nome.contains('resumo_fxhr') ||
+        nome.contains('linha') ||
+        nome.contains('mensal') ||
+        nome.contains('quinzenal') ||
+        nome.contains('resumo') ||
+        nome.contains('operacional')) {
       return true;
     }
 
@@ -971,11 +973,16 @@ class LocalDataLoader {
       _parsePassageiros(htmlStr, mesAno, periodicidade, dataset);
     } else if (nome.contains('fcv')) {
       _parseFcv(htmlStr, mesAno, periodicidade, dataset);
-    } else if (nome.contains('fxhr') || nome.contains('fx_hr')) {
+    } else if (nome.contains('fxhr') || nome.contains('fx_hr') || nome.contains('resumo_fxhr')) {
       _parseFxHr(htmlStr, mesAno, periodicidade, dataset);
-    } else if (nome.contains('linhas')) {
+    } else if (nome.contains('linha')) {
       _parseLinhas(htmlStr, mesAno, periodicidade, dataset);
-    } else if (RegExp(r'(mensal|quinzenal)[_\s-]*\d{6}').hasMatch(nome)) {
+    } else if (nome.contains('mensal') ||
+        nome.contains('quinzenal') ||
+        nome.contains('resumo') ||
+        nome.contains('operacional') ||
+        htmlStr.contains('nrViagensProg') ||
+        htmlStr.contains('kmProd')) {
       _parseResumoGeral(htmlStr, mesAno, periodicidade, dataset);
     }
   }
@@ -997,7 +1004,10 @@ class LocalDataLoader {
 
   static List<List<String>> _extrairLinhasTabelaDados(String htmlContent, int minCols) {
     final doc = html_parser.parse(htmlContent);
-    final tabelas = doc.querySelectorAll('table.data');
+    var tabelas = doc.querySelectorAll('table.data');
+    if (tabelas.isEmpty) {
+      tabelas = doc.querySelectorAll('table');
+    }
     final resultado = <List<String>>[];
 
     for (final tab in tabelas) {
@@ -1111,24 +1121,39 @@ class LocalDataLoader {
   static void _parseFxHr(String html, String mesAno, String per, SemobDataset ds) {
     final rows = _extrairLinhasTabelaDados(html, 6);
     for (final r in rows) {
-      final dt = _parseDataBR(r[0]);
+      DateTime? dt = _parseDataBR(r[0]);
+      String dataStr = r[0];
+      String linhaStr = r[1];
+      String fx = r.length > 2 ? r[2] : '';
+      int idxVeic = 3;
+      int idxViag = 4;
+      int idxPart = 5;
+
+      if (dt == null && r.length > 1) {
+        dt = _parseDataBR(r[1]);
+        if (dt != null) {
+          dataStr = r[1];
+          linhaStr = r[0];
+          fx = r.length > 2 ? r[2] : '';
+        }
+      }
       if (dt == null) continue;
-      final fx = r[2];
+
       final hora = int.tryParse(fx.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
       _inserirOuReconciliarFxHr(
         ds,
         FaixaHorariaItem(
           mesAno: mesAno,
           periodicidade: per,
-          data: r[0],
+          data: dataStr,
           dateTime: dt,
           weekday: dt.weekday,
-          linha: r[1].padLeft(2, '0'),
+          linha: linhaStr.padLeft(2, '0'),
           hora: hora,
           faixaTexto: fx,
-          veiculos: _toInt(r[3]),
-          viagens: _toInt(r[4]),
-          partidas: r[5],
+          veiculos: r.length > idxVeic ? _toInt(r[idxVeic]) : 0,
+          viagens: r.length > idxViag ? _toInt(r[idxViag]) : 0,
+          partidas: r.length > idxPart ? r[idxPart] : '',
         ),
       );
     }
