@@ -497,7 +497,7 @@ class LocalDataLoader {
   static void reconciliarDerivacoesDiarias(SemobDataset ds) {
     const periodicidadesAlvo = ['Mensal', 'Quinzenal'];
 
-    // 1. Resumos Diários
+    //Resumos Diários
     final resumosSnapshot = List<ResumoDiario>.from(ds.resumos);
     for (final item in resumosSnapshot) {
       for (final perAlvo in periodicidadesAlvo) {
@@ -512,7 +512,7 @@ class LocalDataLoader {
       }
     }
 
-    // 2. Passageiros Diários
+    //Passageiros Diários
     final passSnapshot = List<PassageiroDiario>.from(ds.passageiros);
     for (final item in passSnapshot) {
       for (final perAlvo in periodicidadesAlvo) {
@@ -527,7 +527,7 @@ class LocalDataLoader {
       }
     }
 
-    // 3. FCV por Turno
+    //FCV por Turno
     final fcvSnapshot = List<FcvDiario>.from(ds.fcv);
     for (final item in fcvSnapshot) {
       for (final perAlvo in periodicidadesAlvo) {
@@ -542,7 +542,7 @@ class LocalDataLoader {
       }
     }
 
-    // 4. Faixas Horárias
+    //Faixas Horárias
     final fxSnapshot = List<FaixaHorariaItem>.from(ds.faixasHorarias);
     for (final item in fxSnapshot) {
       for (final perAlvo in periodicidadesAlvo) {
@@ -561,7 +561,7 @@ class LocalDataLoader {
       }
     }
 
-    // 5. Linhas Diárias
+    //Linhas Diárias
     final linhasSnapshot = List<LinhaDiaria>.from(ds.linhas);
     for (final item in linhasSnapshot) {
       for (final perAlvo in periodicidadesAlvo) {
@@ -602,27 +602,40 @@ class LocalDataLoader {
         : (idxOutraPer >= 0 ? ds.resumos[idxOutraPer] : null);
 
     if (referencia != null) {
+      final rotuloRef = referencia.calculadoViaDiario ? 'diário' : 'base';
       final diffs = <String>[];
-      if (referencia.viagensProg != novo.viagensProg) {
-        diffs.add('Viagens Prog.: diário=${referencia.viagensProg} vs ${novo.periodicidade}=${novo.viagensProg}');
+      if (referencia.viagensProg > 0 && novo.viagensProg > 0 && referencia.viagensProg != novo.viagensProg) {
+        diffs.add('Viagens Prog.: $rotuloRef=${referencia.viagensProg} vs ${novo.periodicidade}=${novo.viagensProg}');
       }
-      if (referencia.viagensRealiz != novo.viagensRealiz) {
-        diffs.add('Viagens Realiz.: diário=${referencia.viagensRealiz} vs ${novo.periodicidade}=${novo.viagensRealiz}');
+      if (referencia.viagensRealiz > 0 && novo.viagensRealiz > 0 && referencia.viagensRealiz != novo.viagensRealiz) {
+        diffs.add('Viagens Realiz.: $rotuloRef=${referencia.viagensRealiz} vs ${novo.periodicidade}=${novo.viagensRealiz}');
       }
-      if (referencia.veiculos > 0 && novo.veiculos > 0 && referencia.veiculos != novo.veiculos) {
-        diffs.add('Frota: diário=${referencia.veiculos} vs ${novo.periodicidade}=${novo.veiculos}');
+      final viagensEKmIdenticos = referencia.viagensProg == novo.viagensProg &&
+          referencia.viagensRealiz == novo.viagensRealiz &&
+          (referencia.kmTotal - novo.kmTotal).abs() <= 0.05;
+      final eraFrotaParcialPorFaixa = !referencia.calculadoViaDiario &&
+          viagensEKmIdenticos &&
+          referencia.veiculos == referencia.maxVeicFaixa &&
+          novo.veiculos > referencia.veiculos;
+      if (!eraFrotaParcialPorFaixa &&
+          referencia.veiculos > 0 &&
+          novo.veiculos > 0 &&
+          referencia.veiculos != novo.veiculos) {
+        diffs.add('Frota: $rotuloRef=${referencia.veiculos} vs ${novo.periodicidade}=${novo.veiculos}');
       }
-      if ((referencia.kmTotal - novo.kmTotal).abs() > 0.05) {
+      if (referencia.kmTotal > 0 && novo.kmTotal > 0 && (referencia.kmTotal - novo.kmTotal).abs() > 0.05) {
         diffs.add(
-          'KM Total: diário=${referencia.kmTotal.toStringAsFixed(2)} vs ${novo.periodicidade}=${novo.kmTotal.toStringAsFixed(2)}',
+          'KM Total: $rotuloRef=${referencia.kmTotal.toStringAsFixed(2)} vs ${novo.periodicidade}=${novo.kmTotal.toStringAsFixed(2)}',
         );
       }
 
       if (diffs.isEmpty) {
-        // Dados idênticos: ignora duplicação, promove eventual cálculo derivado para confirmado e segue a validação
+        // Dados idênticos (ou enriquecimento de campo parcial): ignora duplicação e promove para confirmado
         ds.registrosIdenticosIgnorados++;
         if (idxMesmaPer >= 0) {
-          if (ds.resumos[idxMesmaPer].calculadoViaDiario) {
+          if (ds.resumos[idxMesmaPer].calculadoViaDiario ||
+              ds.resumos[idxMesmaPer].veiculos != novo.veiculos ||
+              ds.resumos[idxMesmaPer].maxVeicFaixa != novo.maxVeicFaixa) {
             ds.resumos[idxMesmaPer] = novo;
           }
           return;
@@ -665,23 +678,32 @@ class LocalDataLoader {
         : (idxOutraPer >= 0 ? ds.passageiros[idxOutraPer] : null);
 
     if (referencia != null) {
+      final rotuloRef = referencia.calculadoViaDiario ? 'diário' : 'base';
       final diffs = <String>[];
-      if (referencia.catraca != novo.catraca) {
-        diffs.add('Catraca: diário=${referencia.catraca} vs ${novo.periodicidade}=${novo.catraca}');
+      // Quando a base vem consolidada com pagantes = catraca + antecipados (antecipados=0),
+      // reconcilia sem falso alerta se a soma de pagantes for idêntica.
+      final pagantesConsolidadosIguais =
+          ((referencia.antecipados == 0 && novo.antecipados > 0) ||
+              (novo.antecipados == 0 && referencia.antecipados > 0)) &&
+          (referencia.catraca + referencia.antecipados) == (novo.catraca + novo.antecipados);
+
+      if (!pagantesConsolidadosIguais && referencia.catraca != novo.catraca) {
+        diffs.add('Catraca: $rotuloRef=${referencia.catraca} vs ${novo.periodicidade}=${novo.catraca}');
       }
       if (referencia.naoPagantes != novo.naoPagantes) {
-        diffs.add('Gratuitos: diário=${referencia.naoPagantes} vs ${novo.periodicidade}=${novo.naoPagantes}');
+        diffs.add('Gratuitos: $rotuloRef=${referencia.naoPagantes} vs ${novo.periodicidade}=${novo.naoPagantes}');
       }
       if (referencia.totalPassageiros != novo.totalPassageiros) {
         diffs.add(
-          'Total Passageiros: diário=${referencia.totalPassageiros} vs ${novo.periodicidade}=${novo.totalPassageiros}',
+          'Total Passageiros: $rotuloRef=${referencia.totalPassageiros} vs ${novo.periodicidade}=${novo.totalPassageiros}',
         );
       }
 
       if (diffs.isEmpty) {
         ds.registrosIdenticosIgnorados++;
         if (idxMesmaPer >= 0) {
-          if (ds.passageiros[idxMesmaPer].calculadoViaDiario) {
+          if (ds.passageiros[idxMesmaPer].calculadoViaDiario ||
+              (ds.passageiros[idxMesmaPer].antecipados == 0 && novo.antecipados > 0)) {
             ds.passageiros[idxMesmaPer] = novo;
           }
           return;
@@ -724,43 +746,49 @@ class LocalDataLoader {
         : (idxOutraPer >= 0 ? ds.fcv[idxOutraPer] : null);
 
     if (referencia != null) {
-      final diffs = <String>[];
-      if (referencia.totalProg != novo.totalProg || referencia.totalRealiz != novo.totalRealiz) {
-        diffs.add(
-          'Total FCV: diário=${referencia.totalRealiz}/${referencia.totalProg} vs ${novo.periodicidade}=${novo.totalRealiz}/${novo.totalProg}',
-        );
-      }
-      if (referencia.manhaRealiz != novo.manhaRealiz ||
-          referencia.tardeRealiz != novo.tardeRealiz ||
-          referencia.noiteRealiz != novo.noiteRealiz) {
-        diffs.add(
-          'Turnos (M/T/N): diário=${referencia.manhaRealiz}/${referencia.tardeRealiz}/${referencia.noiteRealiz} vs ${novo.periodicidade}=${novo.manhaRealiz}/${novo.tardeRealiz}/${novo.noiteRealiz}',
-        );
-      }
+      final qtdNaoDerivados = ds.fcv.where((f) => !f.calculadoViaDiario && f.periodicidade == referencia.periodicidade).length;
+      final eraAgregadoMensalSintetico = qtdNaoDerivados == 1 && referencia.totalProg > novo.totalProg * 2;
 
-      if (diffs.isEmpty) {
-        ds.registrosIdenticosIgnorados++;
-        if (idxMesmaPer >= 0) {
-          if (ds.fcv[idxMesmaPer].calculadoViaDiario) {
-            ds.fcv[idxMesmaPer] = novo;
-          }
-          return;
+      if (!eraAgregadoMensalSintetico) {
+        final rotuloRef = referencia.calculadoViaDiario ? 'diário' : 'base';
+        final diffs = <String>[];
+        if (referencia.totalProg != novo.totalProg || referencia.totalRealiz != novo.totalRealiz) {
+          diffs.add(
+            'Total FCV: $rotuloRef=${referencia.totalRealiz}/${referencia.totalProg} vs ${novo.periodicidade}=${novo.totalRealiz}/${novo.totalProg}',
+          );
         }
-      } else {
-        final origemBase = referencia.calculadoViaDiario
-            ? 'Cálculo via Diários'
-            : 'Base ${referencia.periodicidade}';
-        _registrarDiscrepanciaUnica(
-          ds,
-          DiscrepanciaConsolidacao(
-            data: novo.data,
-            categoria: 'FCV por Período',
-            periodicidadeNova: novo.periodicidade,
-            periodicidadeBase: origemBase,
-            descricao:
-                'O HTML ${novo.periodicidade} de FCV divergiu de $origemBase em ${novo.data} (${diffs.join(" | ")}).',
-          ),
-        );
+        if (referencia.manhaRealiz != novo.manhaRealiz ||
+            referencia.tardeRealiz != novo.tardeRealiz ||
+            referencia.noiteRealiz != novo.noiteRealiz) {
+          diffs.add(
+            'Turnos (M/T/N): $rotuloRef=${referencia.manhaRealiz}/${referencia.tardeRealiz}/${referencia.noiteRealiz} vs ${novo.periodicidade}=${novo.manhaRealiz}/${novo.tardeRealiz}/${novo.noiteRealiz}',
+          );
+        }
+
+        if (diffs.isEmpty) {
+          ds.registrosIdenticosIgnorados++;
+          if (idxMesmaPer >= 0) {
+            if (ds.fcv[idxMesmaPer].calculadoViaDiario) {
+              ds.fcv[idxMesmaPer] = novo;
+            }
+            return;
+          }
+        } else {
+          final origemBase = referencia.calculadoViaDiario
+              ? 'Cálculo via Diários'
+              : 'Base ${referencia.periodicidade}';
+          _registrarDiscrepanciaUnica(
+            ds,
+            DiscrepanciaConsolidacao(
+              data: novo.data,
+              categoria: 'FCV por Período',
+              periodicidadeNova: novo.periodicidade,
+              periodicidadeBase: origemBase,
+              descricao:
+                  'O HTML ${novo.periodicidade} de FCV divergiu de $origemBase em ${novo.data} (${diffs.join(" | ")}).',
+            ),
+          );
+        }
       }
     }
 

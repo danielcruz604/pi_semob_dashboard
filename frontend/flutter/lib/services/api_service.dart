@@ -184,16 +184,6 @@ class ApiService {
         }
       } catch (_) {}
 
-      // Mapeia o pico de veículos por data a partir das faixas horárias
-      final Map<String, int> veiculosPorDataIso = {};
-      for (final h in horariosRaw) {
-        final dIso = h['data']?.toString() ?? '';
-        final veic = (h['numero_veiculos'] as num?)?.toInt() ?? 0;
-        if (veic > (veiculosPorDataIso[dIso] ?? 0)) {
-          veiculosPorDataIso[dIso] = veic;
-        }
-      }
-
       final resumos = <ResumoDiario>[];
       final passageiros = <PassageiroDiario>[];
       final fcvList = <FcvDiario>[];
@@ -212,14 +202,16 @@ class ApiService {
         final kmTotal = (item['km_total'] as num?)?.toDouble() ?? 0.0;
         final kmImprod = (item['km_improdutivo'] as num?)?.toDouble() ?? 0.0;
         final kmProd = (item['km_produtivo'] as num?)?.toDouble() ?? (kmTotal - kmImprod);
-        final veiculosDia = veiculosPorDataIso[refIso] ?? 0;
+        // Frota diária do sistema vem exclusivamente de `viagensSistema` (nunca de `viagensHorario`, que é por linha/hora)
+        final veiculosDia = (item['numero_veiculos'] as num?)?.toInt() ?? 0;
+        final maxVeicFaixaDia = (item['numero_max_veiculos_faixa'] as num?)?.toInt() ?? veiculosDia;
 
-        if (viagProg > 0 || viagReal > 0 || kmTotal > 0) {
+        if (kmTotal > 0 || (viagProg > 0 && item['fcv_por_periodo'] == null)) {
           resumos.add(ResumoDiario(
             data: dataBR,
             weekday: dt.weekday,
             veiculos: veiculosDia,
-            maxVeicFaixa: veiculosDia,
+            maxVeicFaixa: maxVeicFaixaDia,
             viagensProg: viagProg,
             viagensRealiz: viagReal,
             difViagens: (viagProg - viagReal).abs(),
@@ -232,16 +224,52 @@ class ApiService {
           ));
         }
 
+        final fcvDiaMap = item['fcv_por_periodo'] as Map?;
+        if (fcvDiaMap != null) {
+          final manha = fcvDiaMap['manha'] as Map? ?? {};
+          final tarde = fcvDiaMap['tarde'] as Map? ?? {};
+          final noite = fcvDiaMap['noite'] as Map? ?? {};
+          final manhaP = (manha['prog'] as num?)?.toInt() ?? 0;
+          final manhaR = (manha['real'] as num?)?.toInt() ?? 0;
+          final tardeP = (tarde['prog'] as num?)?.toInt() ?? 0;
+          final tardeR = (tarde['real'] as num?)?.toInt() ?? 0;
+          final noiteP = (noite['prog'] as num?)?.toInt() ?? 0;
+          final noiteR = (noite['real'] as num?)?.toInt() ?? 0;
+          final somaProgTurnos = manhaP + tardeP + noiteP;
+          final somaRealTurnos = manhaR + tardeR + noiteR;
+
+          if (somaProgTurnos > 0 || somaRealTurnos > 0) {
+            fcvList.add(FcvDiario(
+              mesAno: mesAno,
+              periodicidade: 'Mensal',
+              data: dataBR,
+              dateTime: dt,
+              weekday: dt.weekday,
+              manhaProg: manhaP,
+              manhaRealiz: manhaR,
+              tardeProg: tardeP,
+              tardeRealiz: tardeR,
+              noiteProg: noiteP,
+              noiteRealiz: noiteR,
+              totalProg: viagProg > 0 ? viagProg : somaProgTurnos,
+              totalRealiz: viagReal > 0 ? viagReal : somaRealTurnos,
+            ));
+          }
+        }
+
         final passPag = (item['passageiros_pagantes'] as num?)?.toInt() ?? 0;
+        final passCatraca = (item['catraca'] as num?)?.toInt() ?? 0;
+        final passAntecipados = (item['antecipados'] as num?)?.toInt() ?? 0;
         final passNaoPag = (item['passageiros_nao_pagantes'] as num?)?.toInt() ?? 0;
         final passTot = (item['total_passageiros'] as num?)?.toInt() ?? (passPag + passNaoPag);
 
         if (passTot > 0 || passPag > 0 || passNaoPag > 0) {
+          final temDecomposicao = passCatraca > 0 || passAntecipados > 0;
           passageiros.add(PassageiroDiario(
             data: dataBR,
             weekday: dt.weekday,
-            catraca: passPag,
-            antecipados: 0,
+            catraca: temDecomposicao ? passCatraca : passPag,
+            antecipados: temDecomposicao ? passAntecipados : 0,
             naoPagantes: passNaoPag,
             totalPassageiros: passTot,
             mesAno: mesAno,
@@ -251,9 +279,10 @@ class ApiService {
         }
       }
 
-      // Se o backend tiver turnos consolidados de FCV, registra no dataset para exibição fiel dos turnos
-      final fcvPorPeriodo = (resumoRaw?['viagens'] as Map?)?['fcv_por_periodo'] as Map?;
-      if (fcvPorPeriodo != null) {
+      // Fallback caso o servidor esteja em versão anterior que não envie fcv_por_periodo na série diária
+      final fcvPorPeriodo = ((resumoRaw?['viagens'] as Map?)?['por_periodo'] ??
+          (resumoRaw?['viagens'] as Map?)?['fcv_por_periodo']) as Map?;
+      if (fcvList.isEmpty && fcvPorPeriodo != null) {
         final manha = fcvPorPeriodo['manha'] as Map? ?? {};
         final tarde = fcvPorPeriodo['tarde'] as Map? ?? {};
         final noite = fcvPorPeriodo['noite'] as Map? ?? {};
@@ -291,16 +320,22 @@ class ApiService {
         final p = refIso.split('-');
         final dt = p.length == 3 ? DateTime(int.parse(p[0]), int.parse(p[1]), int.parse(p[2])) : DateTime(2026, 8, 1);
         final dataBR = p.length == 3 ? '${p[2]}/${p[1]}/${p[0]}' : refIso;
+        final horaInt = (h['hora'] as num?)?.toInt() ?? 0;
+        final linhaNorm = (h['linha']?.toString() ?? '').trim().padLeft(2, '0');
+        final partidasRaw = h['partidas'];
+        final partidasStr = partidasRaw is List
+            ? partidasRaw.join(' > ')
+            : (partidasRaw?.toString() ?? '');
 
         faixasHorarias.add(FaixaHorariaItem(
           data: dataBR,
           weekday: dt.weekday,
-          linha: h['linha']?.toString() ?? '',
-          hora: (h['hora'] as num?)?.toInt() ?? 0,
-          faixaTexto: h['faixa']?.toString() ?? '',
+          linha: linhaNorm,
+          hora: horaInt,
+          faixaTexto: h['faixa']?.toString() ?? '${horaInt}hs',
           veiculos: (h['numero_veiculos'] as num?)?.toInt() ?? 0,
           viagens: (h['viagens'] as num?)?.toInt() ?? 0,
-          partidas: h['partidas']?.toString() ?? '',
+          partidas: partidasStr,
           mesAno: '${_nomeMes(dt.month)}/${dt.year}',
           periodicidade: 'Mensal',
           dateTime: dt,
