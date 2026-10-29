@@ -181,6 +181,22 @@ Directory? _resolverDiretorioAndroid(String rawPath) {
   return null;
 }
 
+Future<List<ArquivoLido>> selecionarPastaWeb(
+  bool Function(String nome) filtroNome,
+) async {
+  return [];
+}
+
+Future<List<int>> lerArquivoNativoPorCaminho(String caminho) async {
+  try {
+    final file = File(caminho);
+    if (file.existsSync()) {
+      return await file.readAsBytes();
+    }
+  } catch (_) {}
+  return [];
+}
+
 Future<void> salvarBytesNoCaminho(String caminho, List<int> bytes) async {
   try {
     final file = File(caminho);
