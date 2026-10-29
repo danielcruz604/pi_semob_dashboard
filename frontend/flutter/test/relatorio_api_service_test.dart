@@ -731,4 +731,48 @@ void main() {
     expect(passMensal.catraca, 5168);
     expect(passMensal.antecipados, 676);
   });
+
+  test('carregarArquivosSelecionados processa lote de PlatformFile (com propriedade .bytes sem .readAsBytes)', () async {
+    const htmlMensal = '''
+      <html><body><table class="data">
+        <tr><th>Data</th><th>Dia</th><th>Veic</th><th>Max</th><th>Prog</th><th>Realiz</th><th>Dif</th><th>KmProd</th><th>KmImprod</th><th>KmTotal</th></tr>
+        <tr><td>01/08/2026</td><td>Sab</td><td>37</td><td>35</td><td>924</td><td>924</td><td>0</td><td>6.889,4</td><td>344,3</td><td>7.233,7</td></tr>
+      </table></body></html>
+    ''';
+    const htmlPassageiros = '''
+      <html><body><table class="data">
+        <tr><th>Mes</th><th>Dia</th><th>Catraca</th><th>Antecipados</th><th>NaoPagantes</th><th>Total</th></tr>
+        <tr><td>2026-08</td><td>01</td><td>5.168</td><td>676</td><td>10.700</td><td>16.544</td></tr>
+      </table></body></html>
+    ''';
+
+    final ds = await LocalDataLoader.carregarArquivosSelecionados([
+      _FakePlatformFile(
+        name: 'Mensal_202608.html',
+        path: 'C:/relatorios/Mensal_202608.html',
+        bytes: utf8.encode(htmlMensal),
+      ),
+      _FakePlatformFile(
+        name: 'Passageiros_Mensal.html',
+        path: 'C:/relatorios/Passageiros_Mensal.html',
+        bytes: utf8.encode(htmlPassageiros),
+      ),
+    ]);
+
+    expect(ds.arquivosHtmlCarregados.length, 2);
+    expect(ds.resumos.isNotEmpty, isTrue);
+    expect(ds.passageiros.isNotEmpty, isTrue);
+  });
+}
+
+class _FakePlatformFile {
+  final String name;
+  final String? path;
+  final List<int>? bytes;
+
+  _FakePlatformFile({
+    required this.name,
+    this.path,
+    this.bytes,
+  });
 }
