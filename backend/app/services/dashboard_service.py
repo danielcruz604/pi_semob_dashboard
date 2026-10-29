@@ -230,16 +230,29 @@ def obter_serie_temporal(
             if not isinstance(d.get("data"), datetime):
                 continue
             chave = _chave_periodo(d["data"], agrupamento)
+            nr_veic = int(d.get("nrVeiculos") or 0)
+            nr_max_fx = int(d.get("nrMaxVeicFx") or 0)
+            if nr_veic > grupos[chave]["numero_veiculos"]:
+                grupos[chave]["numero_veiculos"] = nr_veic
+            if nr_max_fx > grupos[chave]["numero_max_veiculos_faixa"]:
+                grupos[chave]["numero_max_veiculos_faixa"] = nr_max_fx
             grupos[chave]["km_total"] += float(d.get("kmTotal") or 0.0)
             grupos[chave]["km_produtivo"] += float(d.get("kmProdTotal") or 0.0)
             grupos[chave]["km_improdutivo"] += float(d.get("kmImprodTotal") or 0.0)
             grupos[chave]["viagens_programadas"] += int(d.get("nrViagensProg") or 0)
             grupos[chave]["viagens_realizadas"] += int(d.get("nrTotalViagensRealizadas") or 0)
+            fcv_p = d.get("fcvPorPeriodo") or {}
+            for turno in ("manha", "tarde", "noite"):
+                t_obj = fcv_p.get(turno) or {}
+                grupos[chave][f"fcv_{turno}_prog"] += int(t_obj.get("prog") or 0)
+                grupos[chave][f"fcv_{turno}_real"] += int(t_obj.get("real") or 0)
 
         for d in db[COL_PASSAGEIROS_SISTEMA].find(filtro, {"_id": 0}):
             if not isinstance(d.get("data"), datetime):
                 continue
             chave = _chave_periodo(d["data"], agrupamento)
+            grupos[chave]["catraca"] += int(d.get("catraca") or 0)
+            grupos[chave]["antecipados"] += int(d.get("antecipados") or 0)
             grupos[chave]["passageiros_pagantes"] += _calcular_pagantes(d)
             grupos[chave]["passageiros_nao_pagantes"] += int(d.get("naoPagantes") or 0)
             grupos[chave]["total_passageiros"] += int(d.get("totalPassageiros") or 0)
@@ -259,15 +272,31 @@ def obter_serie_temporal(
         real = int(g["viagens_realizadas"])
         km_t = g["km_total"]
         vendas_t = g["total_vendas"]
+        fcv_por_periodo = None
+        if any(g[f"fcv_{t}_prog"] > 0 or g[f"fcv_{t}_real"] > 0 for t in ("manha", "tarde", "noite")):
+            fcv_por_periodo = {}
+            for t in ("manha", "tarde", "noite"):
+                t_prog = int(g[f"fcv_{t}_prog"])
+                t_real = int(g[f"fcv_{t}_real"])
+                fcv_por_periodo[t] = {
+                    "prog": t_prog,
+                    "real": t_real,
+                    "fcv": _calcular_fcv(t_real, t_prog),
+                }
         serie.append({
             "referencia": ref,
+            "numero_veiculos": int(g["numero_veiculos"]),
+            "numero_max_veiculos_faixa": int(g["numero_max_veiculos_faixa"]),
             "km_total": round(km_t, 2),
             "km_produtivo": round(g["km_produtivo"], 2),
             "km_improdutivo": round(g["km_improdutivo"], 2),
             "viagens_programadas": prog,
             "viagens_realizadas": real,
             "fcv": _calcular_fcv(real, prog),
+            "fcv_por_periodo": fcv_por_periodo,
             "passageiros_pagantes": int(g["passageiros_pagantes"]),
+            "catraca": int(g["catraca"]),
+            "antecipados": int(g["antecipados"]),
             "passageiros_nao_pagantes": int(g["passageiros_nao_pagantes"]),
             "total_passageiros": int(g["total_passageiros"]),
             "total_vendas": round(vendas_t, 2),
@@ -427,7 +456,7 @@ def obter_anomalias(
                     ),
                 })
 
-        # Regra 2: FCV abaixo da meta
+        #FCV abaixo da meta
         fcv = d.get("fcvTotal")
         if fcv is not None and float(fcv) < limiar_fcv:
             fcv_val = float(fcv)

@@ -59,13 +59,18 @@ class ResumoOperacionalSchema(BaseModel):
 
 class ItemSerieTemporalSchema(BaseModel):
     referencia: str
+    numero_veiculos: int = 0
+    numero_max_veiculos_faixa: int = 0
     km_total: float
     km_produtivo: float
     km_improdutivo: float
     viagens_programadas: int
     viagens_realizadas: int
     fcv: float
+    fcv_por_periodo: Optional[Dict[str, TurnoFcvKpiSchema]] = None
     passageiros_pagantes: int
+    catraca: int = 0
+    antecipados: int = 0
     passageiros_nao_pagantes: int
     total_passageiros: int
     total_vendas: float
