@@ -647,4 +647,88 @@ void main() {
       } catch (_) {}
     }
   });
+
+  test('Reconciliacao entre Base Mensal do MongoDB e HTML Mensal nao gera falso alerta de frota por faixa horaria nem de catraca consolidada', () async {
+    // Simula Base Mensal carregada do MongoDB (incluindo cenário legado onde frota era pico de linha/faixa = 5 e catraca = pagantes totais)
+    final dsBanco = SemobDataset()
+      ..resumos.add(
+        ResumoDiario(
+          mesAno: 'Agosto/2026',
+          periodicidade: 'Mensal',
+          data: '01/08/2026',
+          dateTime: DateTime(2026, 8, 1),
+          weekday: 6,
+          veiculos: 5,
+          maxVeicFaixa: 5,
+          viagensProg: 924,
+          viagensRealiz: 924,
+          difViagens: 0,
+          kmProd: 6889.4,
+          kmImprod: 344.3,
+          kmTotal: 7233.7,
+        ),
+      )
+      ..passageiros.add(
+        PassageiroDiario(
+          mesAno: 'Agosto/2026',
+          periodicidade: 'Mensal',
+          data: '01/08/2026',
+          dateTime: DateTime(2026, 8, 1),
+          weekday: 6,
+          catraca: 5844, // catraca (5168) + antecipados (676)
+          antecipados: 0,
+          naoPagantes: 10700,
+          totalPassageiros: 16544,
+        ),
+      );
+    LocalDataLoader.reconciliarDerivacoesDiarias(dsBanco);
+
+    const htmlMensal = '''
+      <html><body>
+        <table class="data">
+          <tr>
+            <th>Data</th><th>Dia</th><th>Veic</th><th>Max</th><th>Prog</th><th>Realiz</th><th>Dif</th><th>KmProd</th><th>KmImprod</th><th>KmTotal</th>
+          </tr>
+          <tr>
+            <td>01/08/2026</td><td>Sab</td><td>37</td><td>35</td><td>924</td><td>924</td><td>0</td><td>6.889,4</td><td>344,3</td><td>7.233,7</td>
+          </tr>
+        </table>
+      </body></html>
+    ''';
+
+    const htmlPassageiros = '''
+      <html><body>
+        <table class="data">
+          <tr><th>Mes</th><th>Dia</th><th>Catraca</th><th>Antecipados</th><th>NaoPagantes</th><th>Total</th></tr>
+          <tr><td>2026-08</td><td>01</td><td>5.168</td><td>676</td><td>10.700</td><td>16.544</td></tr>
+        </table>
+      </body></html>
+    ''';
+
+    final dsReconciliado = await LocalDataLoader.carregarArquivosSelecionados(
+      [
+        _FakePickedFile(
+          name: 'Mensal_202608.html',
+          path: 'C:/relatorios/Mensal_202608.html',
+          html: htmlMensal,
+        ),
+        _FakePickedFile(
+          name: 'Passageiros_Mensal.html',
+          path: 'C:/relatorios/Passageiros_Mensal.html',
+          html: htmlPassageiros,
+        ),
+      ],
+      datasetExistente: dsBanco,
+    );
+
+    // Nenhum falso alerta de discrepância deve ser gerado
+    expect(dsReconciliado.discrepanciasDetectadas, isEmpty);
+    // Frota e decomposição de passageiros foram enriquecidas com os valores completos do sistema
+    final resumoMensal = dsReconciliado.resumos.firstWhere((r) => r.periodicidade == 'Mensal');
+    expect(resumoMensal.veiculos, 37);
+    expect(resumoMensal.maxVeicFaixa, 35);
+    final passMensal = dsReconciliado.passageiros.firstWhere((p) => p.periodicidade == 'Mensal');
+    expect(passMensal.catraca, 5168);
+    expect(passMensal.antecipados, 676);
+  });
 }
