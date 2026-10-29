@@ -231,11 +231,49 @@ class _DashboardPageState extends State<DashboardPage> {
     }
   }
 
-  /// Abre o seletor nativo de pastas no Windows, macOS, Linux, iOS e Android.
-  /// Na Web (Chrome/Edge), abre diretamente o seletor de múltiplos arquivos com dica de seleção total.
+  /// Abre o seletor nativo de pastas em todas as plataformas:
+  /// - Na Web (Chrome/Edge/Firefox): abre o seletor de diretório do navegador (`webkitdirectory`), lendo todos os `.HTML` da pasta e subpastas.
+  /// - No Windows, macOS, Linux, iOS e Android: abre o seletor de diretório do sistema operacional e escaneia recursivamente.
   Future<void> _selecionarPastaUnificada() async {
     if (kIsWeb) {
-      await _selecionarMultiplosArquivos();
+      try {
+        final arquivosDaPasta = await LocalDataLoader.selecionarArquivosDaPastaWeb();
+        if (arquivosDaPasta.isEmpty) return;
+
+        final primeiroCaminho = arquivosDaPasta.first.caminho.replaceAll('\\', '/');
+        final partesCaminho = primeiroCaminho.split('/').where((p) => p.isNotEmpty).toList();
+        final nomePasta = partesCaminho.length > 1 ? partesCaminho.first : 'Pasta (${arquivosDaPasta.length} arq.)';
+
+        setState(() {
+          _carregando = true;
+          _origemCarregada = nomePasta;
+          _statusUpload = 'Processando ${arquivosDaPasta.length} arquivo(s) da pasta...';
+        });
+
+        final ds = LocalDataLoader.carregarListaArquivosLidos(
+          arquivosDaPasta,
+          datasetExistente: _dataset.isEmpty ? null : _dataset,
+        );
+
+        if (ds.discrepanciasDetectadas.isNotEmpty) _alertasExpandidos = true;
+        _aplicarDatasetCarregado(ds);
+
+        await _enviarArquivosParaOBanco(arquivosDaPasta);
+      } catch (e) {
+        debugPrint('Falha ao carregar pasta na Web: $e');
+        if (mounted) {
+          setState(() {
+            _carregando = false;
+            _statusUpload = null;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Erro ao carregar pasta: $e'),
+              backgroundColor: Colors.redAccent,
+            ),
+          );
+        }
+      }
       return;
     }
 
@@ -256,6 +294,7 @@ class _DashboardPageState extends State<DashboardPage> {
       if (path == null) return;
 
       final nomeCurto = LocalDataLoader.extrairNomeCurtoPasta(path);
+      final caminhosAntes = _dataset.arquivosHtmlCarregados.map((a) => a.caminho.toLowerCase()).toSet();
 
       setState(() {
         _carregando = true;
@@ -287,7 +326,12 @@ class _DashboardPageState extends State<DashboardPage> {
       if (ds.discrepanciasDetectadas.isNotEmpty) _alertasExpandidos = true;
       _aplicarDatasetCarregado(ds);
 
-      await _enviarArquivosParaOBanco(ds.arquivosHtmlCarregados);
+      final novosDaPasta = ds.arquivosHtmlCarregados
+          .where((a) => !caminhosAntes.contains(a.caminho.toLowerCase()))
+          .toList();
+      await _enviarArquivosParaOBanco(
+        novosDaPasta.isNotEmpty ? novosDaPasta : ds.arquivosHtmlCarregados,
+      );
     } catch (e) {
       debugPrint('Falha ao processar pasta selecionada: $e');
       if (mounted) {
