@@ -59,3 +59,25 @@ class DashboardDAO:
         resultado = list(self.db[COL_PASSAGEIROS_SISTEMA].aggregate(pipeline))
         return resultado[0] if resultado else {}
 
+    def agregar_resumo_financeiro(self, filtro: Dict[str, Any]) -> Dict[str, Any]:
+        """Soma vendas e utilização, e pega o último saldo do período."""
+        # Busca o último saldo ordenando por data
+        ultimo_registro = list(self.db[COL_FINANCEIRO_SISTEMA].find(filtro, {"saldoFinal": 1}).sort("data", -1).limit(1))
+        saldo_recente = ultimo_registro[0].get("saldoFinal") if ultimo_registro else None
+
+        pipeline = [
+            {"$match": filtro},
+            {"$group": {
+                "_id": None,
+                "vendas": {"$sum": "$totalVendas"},
+                "utilizacao": {"$sum": "$totalUtilizacao"},
+                "transferidos": {"$sum": "$creditosTransferidosParaCartoes"},
+                "circulante": {"$sum": "$creditoCirculante"}
+            }}
+        ]
+        resultado = list(self.db[COL_FINANCEIRO_SISTEMA].aggregate(pipeline))
+        if resultado:
+            resultado[0]["saldo_recente"] = saldo_recente
+            return resultado[0]
+        return {}
+
