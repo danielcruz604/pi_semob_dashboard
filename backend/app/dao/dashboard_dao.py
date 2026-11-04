@@ -93,3 +93,9 @@ class DashboardDAO:
             {"$sort": {"km_total": -1}}
         ]
         return list(self.db[COL_VIAGENS_LINHAS].aggregate(pipeline))
+        
+    def buscar_documentos_brutos(self, colecao: str, filtro: Dict[str, Any], sort_field: str = None) -> List[Dict[str, Any]]:
+        cursor = self.db[colecao].find(filtro, {"_id": 0})
+        if sort_field:
+            cursor = cursor.sort(sort_field, 1)
+        return list(cursor)
