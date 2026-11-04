@@ -81,3 +81,15 @@ class DashboardDAO:
             return resultado[0]
         return {}
 
+    def agregar_ranking_linhas(self, filtro: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Agrupa dados por linha e já devolve ordenado do maior para o menor Km."""
+        pipeline = [
+            {"$match": filtro},
+            {"$group": {
+                "_id": "$linha",
+                "km_total": {"$sum": "$kmTotal"},
+                "viagens": {"$sum": "$nrViagens"}
+            }},
+            {"$sort": {"km_total": -1}}
+        ]
+        return list(self.db[COL_VIAGENS_LINHAS].aggregate(pipeline))
