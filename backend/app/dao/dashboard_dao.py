@@ -12,3 +12,6 @@ from app.services.transporte_repository import (
 class DashboardDAO:
     def __init__(self, db: Database):
         self.db = db
+
+    def obter_datas_unicas(self, colecao: str) -> List[Dict[str, Any]]:
+        return list(self.db[colecao].find({}, {"data": 1, "_id": 0}))
