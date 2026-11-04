@@ -15,3 +15,6 @@ class DashboardDAO:
 
     def obter_datas_unicas(self, colecao: str) -> List[Dict[str, Any]]:
         return list(self.db[colecao].find({}, {"data": 1, "_id": 0}))
+
+    def obter_linhas_unicas(self, colecao: str) -> List[Dict[str, Any]]:
+        return list(self.db[colecao].find({}, {"linha": 1, "_id": 0}))
