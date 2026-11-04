@@ -43,3 +43,19 @@ class DashboardDAO:
                 doc["dias_com_km"] = dias_unicos
                 return doc
             return {}
+
+    def agregar_resumo_passageiros(self, filtro: Dict[str, Any]) -> Dict[str, Any]:
+        """Soma os dados de bilhetagem no banco."""
+        pipeline = [
+            {"$match": filtro},
+            {"$group": {
+                "_id": None,
+                "catraca": {"$sum": "$catraca"},
+                "antecipados": {"$sum": "$antecipados"},
+                "nao_pagantes": {"$sum": "$naoPagantes"},
+                "total_geral": {"$sum": "$totalPassageiros"}
+            }}
+        ]
+        resultado = list(self.db[COL_PASSAGEIROS_SISTEMA].aggregate(pipeline))
+        return resultado[0] if resultado else {}
+
