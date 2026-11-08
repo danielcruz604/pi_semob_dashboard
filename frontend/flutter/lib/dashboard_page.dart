@@ -6,6 +6,8 @@ import 'package:permission_handler/permission_handler.dart';
 import 'folder_scanner_io.dart' if (dart.library.html) 'folder_scanner_web.dart';
 import 'local_data_loader.dart';
 import 'login_page.dart';
+import 'services/api_service.dart';
+import 'utils/export_service.dart';
 import 'sessao_service.dart';
 
 enum ModoAnalise { extratoPeriodo, compararDiasSemana }
