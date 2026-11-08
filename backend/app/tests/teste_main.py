@@ -3,6 +3,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pymongo.errors import PyMongoError, ServerSelectionTimeoutError
 import amostras_html as A
+from auth_helpers import cabecalho_autenticado
 import main
 
 URL = "/api/transporte/processar-html"
@@ -102,7 +103,11 @@ def teste_falha_ao_criar_indices_nao_derruba_o_app_e_e_registrada(monkeypatch, f
 def teste_startup_sem_variaveis_de_ambiente_apenas_registra_o_erro(factory_limpa, sem_env_mongo, caplog):
     with caplog.at_level(logging.ERROR, logger=main.logger.name):
         with TestClient(main.app) as cliente:
-            resposta = cliente.post(URL, files={"file": ("Mensal_Linhas_202608.html", A.AMOSTRAS["linhas"].conteudo, "text/html")})
+            resposta = cliente.post(
+                URL,
+                files={"file": ("Mensal_Linhas_202608.html", A.AMOSTRAS["linhas"].conteudo, "text/html")},
+                headers=cabecalho_autenticado(),
+            )
             assert resposta.status_code == 200
     assert "Não foi possível garantir os índices" in caplog.text
 
