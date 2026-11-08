@@ -1,11 +1,29 @@
 import 'package:flutter/material.dart';
 import 'dashboard_page.dart';
 import 'login_page.dart';
+import 'relatorio_api_service.dart';
 import 'sessao_service.dart';
+
+/// Permite navegar para o login de qualquer ponto do app (ex.: quando o token expira).
+final GlobalKey<NavigatorState> navegadorKey = GlobalKey<NavigatorState>();
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  RelatorioApiService.aoSessaoExpirar = _tratarSessaoExpirada;
   runApp(const SemobApp());
+}
+
+/// A API recusou o token durante o uso: encerra a sessão e volta para o login.
+void _tratarSessaoExpirada() {
+  SessaoService.sair();
+  navegadorKey.currentState?.pushAndRemoveUntil(
+    MaterialPageRoute(
+      builder: (_) => const LoginPage(
+        mensagemInicial: 'Sua sessão expirou. Faça login novamente.',
+      ),
+    ),
+    (_) => false,
+  );
 }
 
 class SemobApp extends StatelessWidget {
@@ -14,6 +32,7 @@ class SemobApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: navegadorKey,
       title: 'SEMOB • Monitoramento de Transporte',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(

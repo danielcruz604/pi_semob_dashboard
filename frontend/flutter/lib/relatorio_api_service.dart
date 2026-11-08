@@ -838,6 +838,21 @@ class RelatorioApiService {
     _usuarioLogado = null;
   }
 
+  /// Chamado quando a API recusa o token da sessão atual (HTTP 401).
+  /// O app registra aqui a ação de voltar para a tela de login.
+  static void Function()? aoSessaoExpirar;
+
+  /// Dispara [aoSessaoExpirar] se a resposta indicar token recusado.
+  ///
+  /// Ignora o endpoint de login (onde 401 significa senha incorreta) e respostas
+  /// recebidas sem sessão ativa, para não disparar mais de uma vez.
+  static void notificarRespostaNaoAutorizada(int statusCode, {String? endpoint}) {
+    if (statusCode != 401) return;
+    if (endpoint == '/api/usuarios/login') return;
+    if (!estaAutenticado) return;
+    aoSessaoExpirar?.call();
+  }
+
   ///Monta cabeçalhos HTTP incluindo `Authorization: Bearer <token>` quando autenticado
   static Map<String, String> montarHeaders({
     bool jsonBody = false,
@@ -1196,6 +1211,7 @@ class RelatorioApiService {
   }
 
   static Map<String, dynamic> _decodificarJsonObjeto(http.Response response, String endpoint) {
+    notificarRespostaNaoAutorizada(response.statusCode, endpoint: endpoint);
     final texto = utf8.decode(response.bodyBytes, allowMalformed: true).trim();
     if (texto.isEmpty) {
       throw RelatorioApiException(
