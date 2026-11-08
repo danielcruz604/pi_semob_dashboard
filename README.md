@@ -140,6 +140,8 @@ Todas as rotas usam o prefixo `/api`. A lista completa, com os parâmetros e os 
 | Transporte | `POST /transporte/processar-html`, `POST /transporte/processar-e-salvar` |
 | Dashboard | `GET /dashboard/resumo-operacional`, `/serie-temporal`, `/linhas-ranking`, `/horarios`, `/anomalias`, `/relatorio` |
 
+**Autenticação:** com exceção do login (`POST /api/usuarios/login`) e do status (`GET /`), todas as rotas exigem o cabeçalho `Authorization: Bearer <token>`, obtido no login. Sem token, ou com um token inválido ou expirado, a API responde `401`. O cadastro de usuários (`POST /api/usuarios/`) é restrito ao perfil gestor e responde `403` para os demais perfis. No Swagger, use o botão **Authorize** para informar o token.
+
 ## Fluxo de trabalho
 
 - **Branches:** `<área>_<nome>` (por exemplo, `Backend_Zanelli` e `Frontend_Lindsay`), com integração por Pull Request.
