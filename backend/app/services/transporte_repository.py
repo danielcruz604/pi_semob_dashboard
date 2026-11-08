@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Dict, List, Sequence, Type
 from pydantic import BaseModel
 from pymongo import UpdateOne
@@ -63,6 +64,61 @@ def _achatar(documento: Dict[str, Any], prefixo: str = "") -> Dict[str, Any]:
         elif valor is not None:
             plano[caminho] = valor
     return plano
+
+
+def detectar_discrepancias_pre_upsert(
+    db: Database, colecao: str, documentos: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Compara documentos que serão persistidos com registros já existentes na coleção.
+
+    Se o registro já existir para a mesma chave única:
+    - Valores idênticos são ignorados silenciosamente pelo upsert;
+    - Valores divergentes geram alertas de discrepância detalhando o valor anterior e o novo.
+    """
+    if not documentos or colecao not in CHAVES_UNICAS:
+        return []
+
+    chaves = CHAVES_UNICAS[colecao]
+    discrepancias: List[Dict[str, Any]] = []
+
+    for doc in documentos:
+        doc_validado = validar_documento_colecao(colecao, doc)
+        filtro = {chave: doc_validado.get(chave) for chave in chaves}
+        existente = db[colecao].find_one(filtro, {"_id": 0})
+        if not existente:
+            continue
+
+        existente_plano = _achatar(existente)
+        novo_plano = _achatar(doc_validado)
+        for campo, valor_novo in novo_plano.items():
+            if campo in chaves or campo not in existente_plano:
+                continue
+            valor_antigo = existente_plano[campo]
+            if valor_antigo is None:
+                continue
+
+            divergiu = False
+            if isinstance(valor_novo, (int, float)) and isinstance(valor_antigo, (int, float)):
+                divergiu = abs(float(valor_novo) - float(valor_antigo)) > 0.01
+            else:
+                divergiu = valor_novo != valor_antigo
+
+            if divergiu:
+                dt_val = doc_validado.get("data")
+                data_iso = dt_val.strftime("%Y-%m-%d") if isinstance(dt_val, datetime) else str(dt_val or "")
+                discrepancias.append({
+                    "colecao": colecao,
+                    "data": data_iso,
+                    "chave": {
+                        k: (v.strftime("%Y-%m-%d") if isinstance(v, datetime) else v)
+                        for k, v in filtro.items()
+                    },
+                    "campo": campo,
+                    "valor_anterior": valor_antigo,
+                    "valor_novo": valor_novo,
+                })
+
+    return discrepancias
 
 
 def _upsert(db: Database, colecao: str, documentos: List[Dict[str, Any]]) -> int:

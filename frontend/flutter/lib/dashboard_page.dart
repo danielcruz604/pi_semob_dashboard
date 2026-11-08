@@ -3,11 +3,24 @@ import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'folder_scanner_io.dart' if (dart.library.html) 'folder_scanner_web.dart';
 import 'local_data_loader.dart';
 import 'login_page.dart';
 import 'sessao_service.dart';
 
 enum ModoAnalise { extratoPeriodo, compararDiasSemana }
+
+class AlertaOutlier {
+  final String titulo;
+  final String descricao;
+  final bool critico;
+
+  AlertaOutlier({
+    required this.titulo,
+    required this.descricao,
+    this.critico = false,
+  });
+}
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -17,9 +30,12 @@ class DashboardPage extends StatefulWidget {
 }
 
 class _DashboardPageState extends State<DashboardPage> {
+  final _api = ApiService();
   SemobDataset _dataset = SemobDataset();
   bool _carregando = false;
   String? _origemCarregada;
+  bool _backendOnline = false;
+  String? _statusUpload;
 
   String _mesSelecionado = 'Agosto/2026';
   String _periodicidade = 'Quinzenal';
@@ -33,6 +49,9 @@ class _DashboardPageState extends State<DashboardPage> {
 
   int _diaSemanaComparar = 1;
   Set<String> _datasMarcadasComparacao = {};
+
+  bool _modoTV = false;
+  bool _alertasExpandidos = false;
 
   static const Map<int, String> _nomesCurtoDia = {
     1: 'Seg',
@@ -69,57 +88,313 @@ class _DashboardPageState extends State<DashboardPage> {
     12: 'Dezembro',
   };
 
-  /// Abre o seletor nativo de pastas no Windows, macOS, Linux, iOS e Android.
-  /// Na Web (Chrome/Edge), abre diretamente o seletor de múltiplos arquivos.
-  Future<void> _selecionarPastaUnificada() async {
-    if (kIsWeb) {
-      await _selecionarMultiplosArquivos();
+  @override
+  void initState() {
+    super.initState();
+    _inicializarDadosDoBanco();
+  }
+
+  Future<void> _inicializarDadosDoBanco() async {
+    setState(() => _carregando = true);
+
+    final online = await _api.verificarServidorOnline();
+    _backendOnline = online;
+
+    if (online) {
+      final datasetDoBanco = await _api.carregarDatasetDoBanco();
+      if (datasetDoBanco != null && !datasetDoBanco.isEmpty) {
+        _origemCarregada = 'MongoDB';
+        _aplicarDatasetCarregado(datasetDoBanco);
+        return;
+      }
+    }
+
+    if (mounted) {
+      setState(() => _carregando = false);
+    }
+  }
+
+  Future<void> _enviarArquivosParaOBanco(List<ArquivoLido> arquivos) async {
+    if (arquivos.isEmpty) return;
+
+    if (!_backendOnline) {
+      _backendOnline = await _api.verificarServidorOnline();
+    }
+
+    if (!_backendOnline) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Servidor FastAPI offline. Dados exibidos apenas na memória local.'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
       return;
     }
 
-    if (defaultTargetPlatform == TargetPlatform.android) {
-      var status = await Permission.manageExternalStorage.status;
-      if (!status.isGranted) {
-        status = await Permission.manageExternalStorage.request();
+    int salvos = 0;
+    final discrepanciasAntes = _dataset.discrepanciasDetectadas.length;
+    for (int i = 0; i < arquivos.length; i++) {
+      final arq = arquivos[i];
+      if (mounted) {
+        setState(() {
+          _statusUpload = 'Salvando no MongoDB (${i + 1}/${arquivos.length})...';
+        });
       }
-      if (!status.isGranted) {
-        await Permission.storage.request();
+      final ok = await _api.enviarHtmlParaBanco(
+        arq.nome,
+        arq.bytes,
+        datasetParaAlertas: _dataset,
+      );
+      if (ok) salvos++;
+    }
+
+    // Sincroniza com os dados consolidados do MongoDB para integrar todos os tipos de relatórios
+    if (salvos > 0) {
+      final datasetDoBanco = await _api.carregarDatasetDoBanco();
+      if (datasetDoBanco != null && !datasetDoBanco.isEmpty) {
+        _mesclarDatasets(_dataset, datasetDoBanco);
+        _aplicarDatasetCarregado(_dataset);
       }
     }
 
-    final path = await FilePicker.getDirectoryPath(
-      dialogTitle: 'Selecione a pasta de relatórios da SEMOB',
-    );
-    if (path == null) return;
+    if (mounted) {
+      final novasDiscrepancias = _dataset.discrepanciasDetectadas.length - discrepanciasAntes;
+      setState(() {
+        _statusUpload = null;
+        if (novasDiscrepancias > 0) _alertasExpandidos = true;
+        if (_origemCarregada != null && !_origemCarregada!.contains('(MongoDB)')) {
+          _origemCarregada = '$_origemCarregada (MongoDB)';
+        }
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            _dataset.discrepanciasDetectadas.isNotEmpty
+                ? '⚠ $salvos relatórios sincronizados. ${_dataset.discrepanciasDetectadas.length} discrepância(s) detectada(s) na consolidação!'
+                : '✓ $salvos relatórios processados e sincronizados com o MongoDB!',
+          ),
+          backgroundColor:
+              _dataset.discrepanciasDetectadas.isNotEmpty ? const Color(0xFFDC2626) : const Color(0xFF059669),
+        ),
+      );
+    }
+  }
 
-    final nomeCurto = LocalDataLoader.extrairNomeCurtoPasta(path);
+  void _mesclarDatasets(SemobDataset base, SemobDataset novos) {
+    for (final r in novos.resumos) {
+      final idx = base.resumos.indexWhere((e) => e.data == r.data && e.periodicidade == r.periodicidade);
+      if (idx < 0) {
+        base.resumos.add(r);
+      } else if (base.resumos[idx].calculadoViaDiario && !r.calculadoViaDiario) {
+        base.resumos[idx] = r;
+      }
+    }
+    for (final p in novos.passageiros) {
+      final idx = base.passageiros.indexWhere((e) => e.data == p.data && e.periodicidade == p.periodicidade);
+      if (idx < 0) {
+        base.passageiros.add(p);
+      } else if (base.passageiros[idx].calculadoViaDiario && !p.calculadoViaDiario) {
+        base.passageiros[idx] = p;
+      }
+    }
+    for (final f in novos.fcv) {
+      final idx = base.fcv.indexWhere((e) => e.data == f.data && e.periodicidade == f.periodicidade);
+      if (idx < 0) {
+        base.fcv.add(f);
+      } else if (base.fcv[idx].calculadoViaDiario && !f.calculadoViaDiario) {
+        base.fcv[idx] = f;
+      }
+    }
+    for (final fh in novos.faixasHorarias) {
+      if (!base.faixasHorarias.any((e) =>
+          e.data == fh.data && e.linha == fh.linha && e.hora == fh.hora && e.periodicidade == fh.periodicidade)) {
+        base.faixasHorarias.add(fh);
+      }
+    }
+    for (final l in novos.linhas) {
+      if (!base.linhas.any((e) => e.data == l.data && e.linha == l.linha && e.periodicidade == l.periodicidade)) {
+        base.linhas.add(l);
+      }
+    }
+    for (final a in novos.arquivosHtmlCarregados) {
+      if (!base.arquivosHtmlCarregados.any((e) => e.nome.toLowerCase() == a.nome.toLowerCase())) {
+        base.arquivosHtmlCarregados.add(a);
+      }
+    }
+    for (final d in novos.discrepanciasDetectadas) {
+      if (!base.discrepanciasDetectadas.any((e) => e.data == d.data && e.descricao == d.descricao)) {
+        base.discrepanciasDetectadas.add(d);
+      }
+    }
+  }
 
-    setState(() {
-      _carregando = true;
-      _origemCarregada = nomeCurto;
-    });
+  /// Abre o seletor nativo de pastas em todas as plataformas:
+  /// - Na Web (Chrome/Edge/Firefox): abre o seletor de diretório do navegador (`webkitdirectory`), lendo todos os `.HTML` da pasta e subpastas.
+  /// - No Windows, macOS, Linux, iOS e Android: abre o seletor de diretório do sistema operacional e escaneia recursivamente.
+  Future<void> _selecionarPastaUnificada() async {
+    if (kIsWeb) {
+      try {
+        final arquivosDaPasta = await LocalDataLoader.selecionarArquivosDaPastaWeb();
+        if (arquivosDaPasta.isEmpty) return;
 
-    final ds = await LocalDataLoader.carregarPasta(path);
-    _aplicarDatasetCarregado(ds);
+        final primeiroCaminho = arquivosDaPasta.first.caminho.replaceAll('\\', '/');
+        final partesCaminho = primeiroCaminho.split('/').where((p) => p.isNotEmpty).toList();
+        final nomePasta = partesCaminho.length > 1 ? partesCaminho.first : 'Pasta (${arquivosDaPasta.length} arq.)';
+
+        setState(() {
+          _carregando = true;
+          _origemCarregada = nomePasta;
+          _statusUpload = 'Processando ${arquivosDaPasta.length} arquivo(s) da pasta...';
+        });
+
+        final ds = LocalDataLoader.carregarListaArquivosLidos(
+          arquivosDaPasta,
+          datasetExistente: _dataset.isEmpty ? null : _dataset,
+        );
+
+        if (ds.discrepanciasDetectadas.isNotEmpty) _alertasExpandidos = true;
+        _aplicarDatasetCarregado(ds);
+
+        await _enviarArquivosParaOBanco(arquivosDaPasta);
+      } catch (e) {
+        debugPrint('Falha ao carregar pasta na Web: $e');
+        if (mounted) {
+          setState(() {
+            _carregando = false;
+            _statusUpload = null;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Erro ao carregar pasta: $e'),
+              backgroundColor: Colors.redAccent,
+            ),
+          );
+        }
+      }
+      return;
+    }
+
+    try {
+      if (defaultTargetPlatform == TargetPlatform.android) {
+        var status = await Permission.manageExternalStorage.status;
+        if (!status.isGranted) {
+          status = await Permission.manageExternalStorage.request();
+        }
+        if (!status.isGranted) {
+          await Permission.storage.request();
+        }
+      }
+
+      final path = await FilePicker.getDirectoryPath(
+        dialogTitle: 'Selecione a pasta com os relatórios HTML da SEMOB',
+      );
+      if (path == null) return;
+
+      final nomeCurto = LocalDataLoader.extrairNomeCurtoPasta(path);
+      final caminhosAntes = _dataset.arquivosHtmlCarregados.map((a) => a.caminho.toLowerCase()).toSet();
+
+      setState(() {
+        _carregando = true;
+        _origemCarregada = nomeCurto;
+        _statusUpload = 'Lendo e escaneando arquivos da pasta...';
+      });
+
+      final ds = await LocalDataLoader.carregarPasta(
+        path,
+        datasetExistente: _dataset.isEmpty ? null : _dataset,
+      );
+
+      if (ds.arquivosHtmlCarregados.isEmpty) {
+        if (mounted) {
+          setState(() {
+            _carregando = false;
+            _statusUpload = null;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Nenhum arquivo .HTML ou .HTM encontrado na pasta selecionada.'),
+              backgroundColor: Colors.orange,
+            ),
+          );
+        }
+        return;
+      }
+
+      if (ds.discrepanciasDetectadas.isNotEmpty) _alertasExpandidos = true;
+      _aplicarDatasetCarregado(ds);
+
+      final novosDaPasta = ds.arquivosHtmlCarregados
+          .where((a) => !caminhosAntes.contains(a.caminho.toLowerCase()))
+          .toList();
+      await _enviarArquivosParaOBanco(
+        novosDaPasta.isNotEmpty ? novosDaPasta : ds.arquivosHtmlCarregados,
+      );
+    } catch (e) {
+      debugPrint('Falha ao processar pasta selecionada: $e');
+      if (mounted) {
+        setState(() {
+          _carregando = false;
+          _statusUpload = null;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Erro ao abrir pasta: $e'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    }
   }
 
   /// Seleção direta de múltiplos arquivos .HTML (Funciona em todas as 6 plataformas)
   Future<void> _selecionarMultiplosArquivos() async {
-    final files = await FilePicker.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['html', 'htm'],
-      dialogTitle: 'Selecione os arquivos HTML da SEMOB',
-    );
+    try {
+      final result = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['html', 'htm'],
+        dialogTitle: 'Selecione os arquivos HTML da SEMOB (pressione Ctrl+A para selecionar todos)',
+      );
 
-    if (files.isEmpty) return;
+      if (result.isEmpty) return;
 
-    setState(() {
-      _carregando = true;
-      _origemCarregada = '${files.length} arq.';
-    });
+      final nomesNovos = result.map((f) => f.name.toLowerCase()).toSet();
 
-    final ds = await LocalDataLoader.carregarArquivosSelecionados(files);
-    _aplicarDatasetCarregado(ds);
+      setState(() {
+        _carregando = true;
+        _origemCarregada = result.length == 1
+            ? result.first.name
+            : '${_dataset.arquivosHtmlCarregados.length + result.length} arq.';
+        _statusUpload = 'Processando ${result.length} arquivo(s)...';
+      });
+
+      final ds = await LocalDataLoader.carregarArquivosSelecionados(
+        result,
+        datasetExistente: _dataset.isEmpty ? null : _dataset,
+      );
+      if (ds.discrepanciasDetectadas.isNotEmpty) _alertasExpandidos = true;
+      _aplicarDatasetCarregado(ds);
+
+      final apenasNovos = ds.arquivosHtmlCarregados
+          .where((a) => nomesNovos.contains(a.nome.toLowerCase()))
+          .toList();
+      await _enviarArquivosParaOBanco(apenasNovos);
+    } catch (e) {
+      debugPrint('Erro ao selecionar múltiplos arquivos: $e');
+      if (mounted) {
+        setState(() {
+          _carregando = false;
+          _statusUpload = null;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Erro ao carregar arquivos selecionados: $e'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    }
   }
 
   void _aplicarDatasetCarregado(SemobDataset ds) {
@@ -152,14 +427,18 @@ class _DashboardPageState extends State<DashboardPage> {
   String _obterPeriodicidadeValida(SemobDataset ds, String mesAlvo, String preferida) {
     final temPreferida = ds.resumos.any((e) => e.mesAno == mesAlvo && e.periodicidade == preferida) ||
         ds.passageiros.any((e) => e.mesAno == mesAlvo && e.periodicidade == preferida) ||
-        ds.faixasHorarias.any((e) => e.mesAno == mesAlvo && e.periodicidade == preferida);
+        ds.fcv.any((e) => e.mesAno == mesAlvo && e.periodicidade == preferida) ||
+        ds.faixasHorarias.any((e) => e.mesAno == mesAlvo && e.periodicidade == preferida) ||
+        ds.linhas.any((e) => e.mesAno == mesAlvo && e.periodicidade == preferida);
 
     if (temPreferida) return preferida;
 
     final outra = preferida == 'Mensal' ? 'Quinzenal' : 'Mensal';
     final temOutra = ds.resumos.any((e) => e.mesAno == mesAlvo && e.periodicidade == outra) ||
         ds.passageiros.any((e) => e.mesAno == mesAlvo && e.periodicidade == outra) ||
-        ds.faixasHorarias.any((e) => e.mesAno == mesAlvo && e.periodicidade == outra);
+        ds.fcv.any((e) => e.mesAno == mesAlvo && e.periodicidade == outra) ||
+        ds.faixasHorarias.any((e) => e.mesAno == mesAlvo && e.periodicidade == outra) ||
+        ds.linhas.any((e) => e.mesAno == mesAlvo && e.periodicidade == outra);
 
     return temOutra ? outra : preferida;
   }
@@ -176,7 +455,9 @@ class _DashboardPageState extends State<DashboardPage> {
     final setDt = <DateTime>{
       ..._dataset.resumos.map((e) => e.dateTime),
       ..._dataset.passageiros.map((e) => e.dateTime),
+      ..._dataset.fcv.map((e) => e.dateTime),
       ..._dataset.faixasHorarias.map((e) => e.dateTime),
+      ..._dataset.linhas.map((e) => e.dateTime),
     };
     final lista = setDt.toList()..sort();
     return lista;
@@ -190,7 +471,13 @@ class _DashboardPageState extends State<DashboardPage> {
       ..._dataset.passageiros
           .where((e) => e.mesAno == _mesSelecionado && e.periodicidade == _periodicidade)
           .map((e) => e.dateTime),
+      ..._dataset.fcv
+          .where((e) => e.mesAno == _mesSelecionado && e.periodicidade == _periodicidade)
+          .map((e) => e.dateTime),
       ..._dataset.faixasHorarias
+          .where((e) => e.mesAno == _mesSelecionado && e.periodicidade == _periodicidade)
+          .map((e) => e.dateTime),
+      ..._dataset.linhas
           .where((e) => e.mesAno == _mesSelecionado && e.periodicidade == _periodicidade)
           .map((e) => e.dateTime),
     };
@@ -382,6 +669,143 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
+  String _obterDescricaoIntervaloFiltro() {
+    if (_modoAtivo == ModoAnalise.extratoPeriodo) {
+      if (_dataInicio != null && _dataFim != null) {
+        return '${_fmtDataBR(_dataInicio!)} a ${_fmtDataBR(_dataFim!)} ($_presetPeriodo)';
+      }
+      return _presetPeriodo;
+    } else {
+      final nomeDia = _nomesLongoDia[_diaSemanaComparar] ?? 'Dia selecionado';
+      return 'Comparação de $nomeDia (${_datasMarcadasComparacao.length} datas)';
+    }
+  }
+
+  Future<void> _exportarRelatorioExecutivoPdf({
+    required List<ResumoDiario> resumos,
+    required List<PassageiroDiario> passageiros,
+    required List<FcvDiario> fcvs,
+    required List<FaixaHorariaItem> faixasHorarias,
+    required List<LinhaDiaria> linhas,
+    required List<AlertaOutlier> outliers,
+  }) async {
+    try {
+      final alertasPdf = outliers
+          .map((o) => AlertaExecutivoPdf(
+                titulo: o.titulo,
+                descricao: o.descricao,
+                critico: o.critico,
+              ))
+          .toList();
+
+      final bytes = await ExportService.gerarBytesRelatorioPdf(
+        mesSelecionado: _mesSelecionado,
+        periodicidade: _periodicidade,
+        linhaSelecionada: _linhaSelecionada,
+        intervaloTexto: _obterDescricaoIntervaloFiltro(),
+        origemDados: _origemCarregada ?? 'Memória Local',
+        resumos: resumos,
+        passageiros: passageiros,
+        fcv: fcvs,
+        faixasHorarias: faixasHorarias,
+        linhas: linhas,
+        alertas: alertasPdf,
+      );
+
+      final nomeSugerido =
+          'relatorio_executivo_semob_${_mesSelecionado.replaceAll('/', '_')}_${_periodicidade.toLowerCase()}.pdf';
+
+      final caminhoSalvo = await FilePicker.saveFile(
+        dialogTitle: 'Exportar Relatório Executivo SEMOB (PDF)',
+        fileName: nomeSugerido,
+        type: FileType.custom,
+        allowedExtensions: ['pdf'],
+        mimeType: 'application/pdf',
+        bytes: bytes,
+      );
+
+      if (!kIsWeb && caminhoSalvo != null && caminhoSalvo.scheme == 'file') {
+        await salvarBytesNoCaminho(caminhoSalvo.toFilePath(), bytes);
+      }
+
+      if (mounted && (kIsWeb || caminhoSalvo != null)) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Relatório Executivo em PDF gerado e salvo com sucesso!'),
+            backgroundColor: Color(0xFF059669),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Erro ao gerar relatório PDF: $e'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    }
+  }
+
+  List<AlertaOutlier> _calcularOutliers(List<ResumoDiario> resumos, List<PassageiroDiario> passageiros) {
+    final alertas = <AlertaOutlier>[];
+
+    // 1. Discrepâncias de consolidação entre cálculo via diários e HTMLs Mensal/Quinzenal anexados:
+    for (final d in _dataset.discrepanciasDetectadas) {
+      alertas.add(AlertaOutlier(
+        titulo: 'Discrepância de Consolidação (${d.categoria} • ${d.data})',
+        descricao: d.descricao,
+        critico: true,
+      ));
+    }
+
+    if (resumos.isEmpty) return alertas;
+
+    for (final r in resumos) {
+      final fcv = r.viagensProg > 0 ? (r.viagensRealiz / r.viagensProg) * 100 : 100.0;
+      if (fcv < 98.0) {
+        alertas.add(AlertaOutlier(
+          titulo: 'Descumprimento de FCV em ${r.data} (${_nomesCurtoDia[r.weekday]})',
+          descricao:
+              'FCV atingiu ${fcv.toStringAsFixed(1)}% (${r.difViagens} viagens não realizadas). Impacto direto no intervalo de espera em SCS.',
+          critico: fcv < 95.0,
+        ));
+      }
+    }
+
+    final diasUteis = resumos.where((r) => r.weekday >= 1 && r.weekday <= 5).toList();
+    if (diasUteis.length >= 3) {
+      final mediaKm = diasUteis.map((e) => e.kmTotal).reduce((a, b) => a + b) / diasUteis.length;
+      for (final r in diasUteis) {
+        final desvio = mediaKm > 0 ? ((r.kmTotal - mediaKm) / mediaKm).abs() : 0.0;
+        if (desvio > 0.25) {
+          alertas.add(AlertaOutlier(
+            titulo: 'Anomalia de Quilometragem em ${r.data}',
+            descricao:
+                'KM total (${r.kmTotal.toStringAsFixed(0)} km) desviou ${(desvio * 100).toStringAsFixed(0)}% da média dos dias úteis (${mediaKm.toStringAsFixed(0)} km).',
+            critico: false,
+          ));
+        }
+      }
+    }
+
+    if (diasUteis.isNotEmpty) {
+      final maxFrota = diasUteis.map((e) => e.veiculos).reduce((a, b) => a > b ? a : b);
+      for (final r in diasUteis) {
+        if (maxFrota > 0 && r.veiculos < (maxFrota * 0.75).round()) {
+          alertas.add(AlertaOutlier(
+            titulo: 'Déficit de Frota Operacional em ${r.data}',
+            descricao: 'Operando com apenas ${r.veiculos} ônibus (${maxFrota - r.veiculos} a menos que a frota de pico).',
+            critico: true,
+          ));
+        }
+      }
+    }
+
+    return alertas;
+  }
+
   @override
   Widget build(BuildContext context) {
     final resumosFiltrados = _dataset.resumos
@@ -413,6 +837,8 @@ class _DashboardPageState extends State<DashboardPage> {
             _dataPassaNoFiltro(e.data, e.dateTime))
         .toList();
 
+    final outliersDetectados = _calcularOutliers(resumosFiltrados, passageirosFiltrados);
+
     return Scaffold(
       backgroundColor: const Color(0xFFF1F5F9),
       appBar: AppBar(
@@ -420,23 +846,93 @@ class _DashboardPageState extends State<DashboardPage> {
         foregroundColor: Colors.white,
         elevation: 0,
         toolbarHeight: 54,
-        title: const Row(
+        title: Row(
           children: [
-            Icon(Icons.directions_bus_filled_rounded, color: Color(0xFF38BDF8), size: 22),
-            SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                'SEMOB • Monitoramento',
-                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
-                overflow: TextOverflow.ellipsis,
+            const Icon(Icons.directions_bus_filled_rounded, color: Color(0xFF38BDF8), size: 22),
+            const SizedBox(width: 8),
+            const Text(
+              'SEMOB • Monitoramento',
+              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
+            ),
+            const SizedBox(width: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: _backendOnline ? const Color(0xFF065F46) : const Color(0xFF475569),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.circle, size: 7, color: _backendOnline ? const Color(0xFF34D399) : Colors.amberAccent),
+                  const SizedBox(width: 5),
+                  Text(
+                    _backendOnline ? 'MongoDB Online' : 'Modo Local',
+                    style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.white),
+                  ),
+                ],
               ),
             ),
           ],
         ),
         actions: [
-          if (!kIsWeb)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+          IconButton(
+            tooltip: 'Sincronizar com MongoDB',
+            icon: const Icon(Icons.sync_rounded, color: Color(0xFF38BDF8), size: 20),
+            onPressed: _carregando ? null : _inicializarDadosDoBanco,
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 2.0),
+            child: Tooltip(
+              message: 'Ajusta fontes e contraste para leitura em telas de 32" ou à distância',
+              child: OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  backgroundColor: _modoTV ? const Color(0xFF0284C7) : Colors.transparent,
+                  foregroundColor: Colors.white,
+                  side: BorderSide(color: _modoTV ? const Color(0xFF38BDF8) : Colors.white30),
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                ),
+                onPressed: () => setState(() => _modoTV = !_modoTV),
+                icon: Icon(Icons.tv_rounded, size: 15, color: _modoTV ? Colors.white : const Color(0xFF38BDF8)),
+                label: Text(
+                  _modoTV ? 'Modo TV: ON' : 'Modo TV 32"',
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+            child: Tooltip(
+              message: 'Exporta Relatório Executivo em PDF com síntese, indicadores e glossário para superiores',
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF059669),
+                  foregroundColor: Colors.white,
+                  elevation: 0,
+                  padding: const EdgeInsets.symmetric(horizontal: 11),
+                ),
+                onPressed: _dataset.isEmpty
+                    ? null
+                    : () => _exportarRelatorioExecutivoPdf(
+                          resumos: resumosFiltrados,
+                          passageiros: passageirosFiltrados,
+                          fcvs: fcvFiltrados,
+                          faixasHorarias: fxHrFiltrados,
+                          linhas: linhasFiltradas,
+                          outliers: outliersDetectados,
+                        ),
+                icon: const Icon(Icons.picture_as_pdf_rounded, size: 16),
+                label: const Text('Exportar PDF', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+            child: Tooltip(
+              message: kIsWeb
+                  ? 'Selecionar múltiplos arquivos da pasta (selecione todos com Ctrl+A)'
+                  : 'Abre e escaneia recursivamente todos os relatórios HTML da pasta selecionada',
               child: ElevatedButton.icon(
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFF0284C7),
@@ -447,15 +943,18 @@ class _DashboardPageState extends State<DashboardPage> {
                 onPressed: _carregando ? null : _selecionarPastaUnificada,
                 icon: const Icon(Icons.folder_open_rounded, size: 16),
                 label: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 120),
+                  constraints: const BoxConstraints(maxWidth: 130),
                   child: Text(
-                    _origemCarregada == null ? 'Abrir Pasta' : _origemCarregada!,
+                    _origemCarregada == null
+                        ? (kIsWeb ? 'Carregar Pasta' : 'Abrir Pasta')
+                        : _origemCarregada!,
                     style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
               ),
             ),
+          ),
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
             child: OutlinedButton.icon(
@@ -510,8 +1009,34 @@ class _DashboardPageState extends State<DashboardPage> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
+                          if (_statusUpload != null)
+                            Container(
+                              margin: const EdgeInsets.only(bottom: 12),
+                              padding: const EdgeInsets.all(10),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFEFF6FF),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(color: const Color(0xFF3B82F6)),
+                              ),
+                              child: Row(
+                                children: [
+                                  const SizedBox(
+                                    width: 14,
+                                    height: 14,
+                                    child: CircularProgressIndicator(strokeWidth: 2),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Text(
+                                    _statusUpload!,
+                                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF1D4ED8)),
+                                  ),
+                                ],
+                              ),
+                            ),
                           _buildBarraTopoSlim(),
-                          const SizedBox(height: 14),
+                          const SizedBox(height: 12),
+                          _buildAvisoOutliers(outliersDetectados),
+                          const SizedBox(height: 12),
                           _buildKPIsResponsivo(
                             isWide,
                             resumosFiltrados,
@@ -525,7 +1050,11 @@ class _DashboardPageState extends State<DashboardPage> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Expanded(
-                                  child: _buildGraficoViagensEQuilometragem(resumosFiltrados, fxHrFiltrados, linhasFiltradas),
+                                  child: _buildGraficoViagensEQuilometragem(
+                                    resumosFiltrados,
+                                    fxHrFiltrados,
+                                    linhasFiltradas,
+                                  ),
                                 ),
                                 const SizedBox(width: 14),
                                 Expanded(
@@ -542,7 +1071,7 @@ class _DashboardPageState extends State<DashboardPage> {
                                 ),
                                 const SizedBox(width: 14),
                                 Expanded(
-                                  child: _buildGraficoTurnosERanking(fcvFiltrados, fxHrFiltrados),
+                                  child: _buildGraficoTurnosERanking(fcvFiltrados, fxHrFiltrados, resumosFiltrados),
                                 ),
                               ],
                             ),
@@ -553,7 +1082,7 @@ class _DashboardPageState extends State<DashboardPage> {
                             const SizedBox(height: 14),
                             _buildGraficoFaixaHoraria(fxHrFiltrados),
                             const SizedBox(height: 14),
-                            _buildGraficoTurnosERanking(fcvFiltrados, fxHrFiltrados),
+                            _buildGraficoTurnosERanking(fcvFiltrados, fxHrFiltrados, resumosFiltrados),
                           ],
                           const SizedBox(height: 14),
                           _buildTabelaResumo(resumosFiltrados, passageirosFiltrados),
@@ -588,9 +1117,9 @@ class _DashboardPageState extends State<DashboardPage> {
             ),
             const SizedBox(height: 8),
             Text(
-              kIsWeb
-                  ? 'No navegador, clique abaixo e selecione todos os arquivos .HTML (Ctrl + A) que deseja analisar.'
-                  : 'Selecione a pasta contendo os relatórios (Mensal / Quinzenal) ou escolha os arquivos .HTML diretamente.',
+              _backendOnline
+                  ? 'MongoDB conectado! Ao selecionar relatórios, eles serão salvos no banco. Se já houver dados gravados, clique no botão de sincronizar no topo.'
+                  : 'Servidor FastAPI offline. Conecte o backend para salvar no banco ou abra os arquivos para análise local temporária.',
               textAlign: TextAlign.center,
               style: const TextStyle(color: Colors.blueGrey, fontSize: 13),
             ),
@@ -600,20 +1129,19 @@ class _DashboardPageState extends State<DashboardPage> {
               runSpacing: 10,
               alignment: WrapAlignment.center,
               children: [
-                if (!kIsWeb)
-                  ElevatedButton.icon(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF0284C7),
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-                    ),
-                    onPressed: _selecionarPastaUnificada,
-                    icon: const Icon(Icons.folder_open),
-                    label: const Text('Selecionar Pasta'),
-                  ),
                 ElevatedButton.icon(
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: kIsWeb ? const Color(0xFF0284C7) : Colors.blueGrey.shade700,
+                    backgroundColor: const Color(0xFF0284C7),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                  ),
+                  onPressed: _selecionarPastaUnificada,
+                  icon: const Icon(Icons.folder_open),
+                  label: Text(kIsWeb ? 'Carregar Pasta (Lote)' : 'Selecionar Pasta'),
+                ),
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blueGrey.shade700,
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
                   ),
@@ -625,6 +1153,145 @@ class _DashboardPageState extends State<DashboardPage> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildAvisoOutliers(List<AlertaOutlier> alertas) {
+    if (alertas.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+        decoration: BoxDecoration(
+          color: const Color(0xFFECFDF5),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: const Color(0xFF10B981).withOpacity(0.4)),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.check_circle_rounded, color: Color(0xFF059669), size: 18),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Operação Regular: Nenhum outlier crítico ou déficit de cumprimento detectado em SCS no recorte atual.',
+                style: TextStyle(
+                  fontSize: _modoTV ? 13 : 11,
+                  fontWeight: FontWeight.w600,
+                  color: const Color(0xFF065F46),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final temCritico = alertas.any((a) => a.critico);
+    final corBase = temCritico ? const Color(0xFFDC2626) : const Color(0xFFD97706);
+    final corFundo = temCritico ? const Color(0xFFFEF2F2) : const Color(0xFFFFFBEB);
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: corFundo,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: corBase.withOpacity(0.6), width: 1.5),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: corBase, size: _modoTV ? 22 : 18),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'ALERTAS DE IMPACTO NA MOBILIDADE (SÃO CAETANO DO SUL)',
+                  style: TextStyle(
+                    fontSize: _modoTV ? 13 : 11,
+                    fontWeight: FontWeight.w900,
+                    color: corBase,
+                    letterSpacing: 0.3,
+                  ),
+                ),
+              ),
+              InkWell(
+                onTap: () => setState(() => _alertasExpandidos = !_alertasExpandidos),
+                borderRadius: BorderRadius.circular(6),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: corBase,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        '${alertas.length} Ocorrências',
+                        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white),
+                      ),
+                      const SizedBox(width: 4),
+                      Icon(
+                        _alertasExpandidos ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down,
+                        size: 16,
+                        color: Colors.white,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (!_alertasExpandidos)
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: alertas.take(3).map((a) {
+                return Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: corBase.withOpacity(0.3)),
+                  ),
+                  child: Text(
+                    '${a.titulo}: ${a.descricao}',
+                    style: TextStyle(fontSize: _modoTV ? 12 : 11, fontWeight: FontWeight.w600, color: const Color(0xFF0F172A)),
+                  ),
+                );
+              }).toList(),
+            )
+          else
+            Column(
+              children: alertas.map((a) {
+                return Padding(
+                  padding: const EdgeInsets.only(top: 6.0),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(Icons.arrow_right_rounded, color: corBase, size: 20),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: RichText(
+                          text: TextSpan(
+                            style: TextStyle(
+                              fontSize: _modoTV ? 13 : 11,
+                              color: const Color(0xFF1E293B),
+                            ),
+                            children: [
+                              TextSpan(text: '${a.titulo} • ', style: TextStyle(fontWeight: FontWeight.bold, color: corBase)),
+                              TextSpan(text: a.descricao),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }).toList(),
+            ),
+        ],
       ),
     );
   }
@@ -1061,6 +1728,13 @@ class _DashboardPageState extends State<DashboardPage> {
       }
     }
 
+    // Fallback: se a frota estiver zerada nos resumos, busca o pico real nas faixas horárias
+    if (maxFrota == 0 && fxHr.isNotEmpty) {
+      for (final f in fxHr) {
+        if (f.veiculos > maxFrota) maxFrota = f.veiculos;
+      }
+    }
+
     int totalPass = 0;
     int totalCatraca = 0;
     int totalGratuitos = 0;
@@ -1149,12 +1823,12 @@ class _DashboardPageState extends State<DashboardPage> {
     required IconData icone,
   }) {
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: EdgeInsets.all(_modoTV ? 14 : 12),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(10),
-        border: Border(left: BorderSide(color: cor, width: 4)),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 4)],
+        border: Border(left: BorderSide(color: cor, width: _modoTV ? 5 : 4)),
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 4)],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1165,17 +1839,41 @@ class _DashboardPageState extends State<DashboardPage> {
               Expanded(
                 child: Text(
                   titulo,
-                  style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Colors.blueGrey),
+                  style: TextStyle(
+                    fontSize: _modoTV ? 11 : 10,
+                    fontWeight: FontWeight.w800,
+                    color: Colors.blueGrey,
+                  ),
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              Icon(icone, size: 15, color: cor),
+              Icon(icone, size: _modoTV ? 17 : 15, color: cor),
             ],
           ),
           const SizedBox(height: 6),
-          Text(valor, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: cor)),
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(
+              valor,
+              style: TextStyle(
+                fontSize: _modoTV ? 24 : 18,
+                fontWeight: FontWeight.w900,
+                color: cor,
+                letterSpacing: -0.3,
+              ),
+            ),
+          ),
           const SizedBox(height: 4),
-          Text(subtitulo, style: const TextStyle(fontSize: 11, color: Colors.grey), overflow: TextOverflow.ellipsis),
+          Text(
+            subtitulo,
+            style: TextStyle(
+              fontSize: _modoTV ? 12 : 11,
+              fontWeight: _modoTV ? FontWeight.w600 : FontWeight.normal,
+              color: Colors.grey.shade600,
+            ),
+            overflow: TextOverflow.ellipsis,
+          ),
         ],
       ),
     );
@@ -1313,7 +2011,10 @@ class _DashboardPageState extends State<DashboardPage> {
                       showTitles: true,
                       interval: interval,
                       reservedSize: 44,
-                      getTitlesWidget: (v, m) => Text(_fmtMilhar(v), style: const TextStyle(fontSize: 10, color: Colors.blueGrey)),
+                      getTitlesWidget: (v, m) => Text(
+                        _fmtMilhar(v),
+                        style: TextStyle(fontSize: _modoTV ? 11 : 10, color: Colors.blueGrey, fontWeight: FontWeight.w600),
+                      ),
                     ),
                   ),
                   bottomTitles: AxisTitles(
@@ -1325,7 +2026,10 @@ class _DashboardPageState extends State<DashboardPage> {
                         if (h % 2 != 0 && horas.length > 12) return const SizedBox.shrink();
                         return Padding(
                           padding: const EdgeInsets.only(top: 6),
-                          child: Text('${h}h', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600)),
+                          child: Text(
+                            '${h}h',
+                            style: TextStyle(fontSize: _modoTV ? 11 : 10, fontWeight: FontWeight.w700),
+                          ),
                         );
                       },
                     ),
@@ -1336,7 +2040,11 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  Widget _buildGraficoTurnosERanking(List<FcvDiario> fcv, List<FaixaHorariaItem> fxHr) {
+  Widget _buildGraficoTurnosERanking(
+    List<FcvDiario> fcv,
+    List<FaixaHorariaItem> fxHr,
+    List<ResumoDiario> resumos,
+  ) {
     int manhaP = 0, manhaR = 0, tardeP = 0, tardeR = 0, noiteP = 0, noiteR = 0;
     for (final item in fcv) {
       manhaP += item.manhaProg;
@@ -1345,6 +2053,30 @@ class _DashboardPageState extends State<DashboardPage> {
       tardeR += item.tardeRealiz;
       noiteP += item.noiteProg;
       noiteR += item.noiteRealiz;
+    }
+
+    // Se a coleção de FCV não contiver divisões de turnos, calcula a partir das faixas horárias reais:
+    if (manhaR == 0 && tardeR == 0 && noiteR == 0 && fxHr.isNotEmpty) {
+      for (final item in fxHr) {
+        if (item.hora >= 5 && item.hora < 12) {
+          manhaR += item.viagens;
+        } else if (item.hora >= 12 && item.hora < 18) {
+          tardeR += item.viagens;
+        } else {
+          noiteR += item.viagens;
+        }
+      }
+
+      int totalProg = 0;
+      int totalReal = 0;
+      for (final r in resumos) {
+        totalProg += r.viagensProg;
+        totalReal += r.viagensRealiz;
+      }
+      final ratio = totalProg > 0 ? (totalReal / totalProg) : 0.9984;
+      manhaP = (manhaR / ratio).round();
+      tardeP = (tardeR / ratio).round();
+      noiteP = (noiteR / ratio).round();
     }
 
     final Map<String, int> viagensPorLinha = {};
@@ -1377,7 +2109,10 @@ class _DashboardPageState extends State<DashboardPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('Top Linhas (Partidas)', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.blueGrey)),
+                Text(
+                  'Top Linhas (Partidas)',
+                  style: TextStyle(fontSize: _modoTV ? 12 : 11, fontWeight: FontWeight.bold, color: Colors.blueGrey),
+                ),
                 const SizedBox(height: 8),
                 Expanded(
                   child: topLinhas.isEmpty
@@ -1396,8 +2131,14 @@ class _DashboardPageState extends State<DashboardPage> {
                                   Row(
                                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                     children: [
-                                      Text('Linha ${item.key}', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-                                      Text('${item.value} viag.', style: const TextStyle(fontSize: 10, color: Colors.blueGrey)),
+                                      Text(
+                                        'Linha ${item.key}',
+                                        style: TextStyle(fontSize: _modoTV ? 12 : 11, fontWeight: FontWeight.bold),
+                                      ),
+                                      Text(
+                                        '${item.value} viag.',
+                                        style: TextStyle(fontSize: _modoTV ? 11 : 10, color: Colors.blueGrey, fontWeight: FontWeight.w600),
+                                      ),
                                     ],
                                   ),
                                   const SizedBox(height: 3),
@@ -1405,7 +2146,7 @@ class _DashboardPageState extends State<DashboardPage> {
                                     borderRadius: BorderRadius.circular(4),
                                     child: LinearProgressIndicator(
                                       value: ratio,
-                                      minHeight: 6,
+                                      minHeight: _modoTV ? 8 : 6,
                                       backgroundColor: const Color(0xFFE2E8F0),
                                       color: const Color(0xFF0284C7),
                                     ),
@@ -1432,8 +2173,8 @@ class _DashboardPageState extends State<DashboardPage> {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(turno, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
-            Text('${perc.toStringAsFixed(1)}%', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: cor)),
+            Text(turno, style: TextStyle(fontWeight: FontWeight.bold, fontSize: _modoTV ? 13 : 12)),
+            Text('${perc.toStringAsFixed(1)}%', style: TextStyle(fontWeight: FontWeight.bold, fontSize: _modoTV ? 12 : 11, color: cor)),
           ],
         ),
         const SizedBox(height: 4),
@@ -1441,7 +2182,7 @@ class _DashboardPageState extends State<DashboardPage> {
           borderRadius: BorderRadius.circular(6),
           child: LinearProgressIndicator(
             value: (perc / 100).clamp(0.0, 1.0),
-            minHeight: 10,
+            minHeight: _modoTV ? 12 : 10,
             backgroundColor: const Color(0xFFE2E8F0),
             color: cor,
           ),
@@ -1507,7 +2248,10 @@ class _DashboardPageState extends State<DashboardPage> {
                       showTitles: true,
                       interval: interval,
                       reservedSize: 44,
-                      getTitlesWidget: (v, m) => Text(_fmtMilhar(v), style: const TextStyle(fontSize: 10, color: Colors.blueGrey)),
+                      getTitlesWidget: (v, m) => Text(
+                        _fmtMilhar(v),
+                        style: TextStyle(fontSize: _modoTV ? 11 : 10, color: Colors.blueGrey, fontWeight: FontWeight.w600),
+                      ),
                     ),
                   ),
                   bottomTitles: AxisTitles(
@@ -1519,7 +2263,10 @@ class _DashboardPageState extends State<DashboardPage> {
                         if (idx < 0 || idx >= labels.length) return const SizedBox.shrink();
                         return Padding(
                           padding: const EdgeInsets.only(top: 6),
-                          child: Text(labels[idx], style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600)),
+                          child: Text(
+                            labels[idx],
+                            style: TextStyle(fontSize: _modoTV ? 11 : 10, fontWeight: FontWeight.w700),
+                          ),
                         );
                       },
                     ),
@@ -1557,7 +2304,7 @@ class _DashboardPageState extends State<DashboardPage> {
     required Widget child,
   }) {
     return Container(
-      height: 300,
+      height: _modoTV ? 320 : 300,
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: Colors.white,
@@ -1574,7 +2321,14 @@ class _DashboardPageState extends State<DashboardPage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(titulo, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: Color(0xFF0F172A))),
+                    Text(
+                      titulo,
+                      style: TextStyle(
+                        fontSize: _modoTV ? 14 : 13,
+                        fontWeight: FontWeight.w800,
+                        color: const Color(0xFF0F172A),
+                      ),
+                    ),
                     const SizedBox(height: 2),
                     Text(subtitulo, style: const TextStyle(fontSize: 11, color: Colors.blueGrey)),
                   ],
@@ -1614,9 +2368,22 @@ class _DashboardPageState extends State<DashboardPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'Espelho Diário Consolidado (Operação + Bilhetagem)',
-            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: Color(0xFF0F172A)),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'Espelho Diário Consolidado (Operação + Bilhetagem)',
+                style: TextStyle(
+                  fontSize: _modoTV ? 14 : 13,
+                  fontWeight: FontWeight.w800,
+                  color: const Color(0xFF0F172A),
+                ),
+              ),
+              Text(
+                '${resumos.length} registros',
+                style: const TextStyle(fontSize: 11, color: Colors.grey, fontWeight: FontWeight.bold),
+              ),
+            ],
           ),
           const SizedBox(height: 10),
           SingleChildScrollView(

@@ -7,6 +7,24 @@ export 'folder_scanner_io.dart' if (dart.library.html) 'folder_scanner_web.dart'
 export 'relatorio_api_service.dart';
 export 'relatorio_integration.dart';
 
+/// Representa uma discrepância detectada quando um relatório HTML (Mensal ou Quinzenal)
+/// sobrepõe dados já existentes ou calculados a partir dos registros diários com valores divergentes.
+class DiscrepanciaConsolidacao {
+  final String data;
+  final String categoria;
+  final String periodicidadeNova;
+  final String periodicidadeBase;
+  final String descricao;
+
+  const DiscrepanciaConsolidacao({
+    required this.data,
+    required this.categoria,
+    required this.periodicidadeNova,
+    required this.periodicidadeBase,
+    required this.descricao,
+  });
+}
+
 class SemobDataset {
   final List<ResumoDiario> resumos = [];
   final List<PassageiroDiario> passageiros = [];
@@ -14,13 +32,22 @@ class SemobDataset {
   final List<FaixaHorariaItem> faixasHorarias = [];
   final List<LinhaDiaria> linhas = [];
 
-  ///Mantém os arquivos HTML brutos carregados para envio sob demanda ao backend FastAPI
+  /// Mantém os arquivos HTML brutos carregados para envio sob demanda ao backend FastAPI
   final List<ArquivoLido> arquivosHtmlCarregados = [];
 
-  ///Último relatório consolidado retornado pelo backend para o conjunto de dados ativo
+  /// Lista de discrepâncias detectadas ao sobrepor cálculos diários com HTMLs Mensais/Quinzenais
+  final List<DiscrepanciaConsolidacao> discrepanciasDetectadas = [];
+
+  /// Contador de registros sobrepostos que possuíam valores idênticos ao cálculo diário e foram ignorados
+  int registrosIdenticosIgnorados = 0;
+
+  /// Contador de registros Mensais/Quinzenais calculados automaticamente a partir dos dados diários
+  int registrosDerivadosViaDiario = 0;
+
+  /// Último relatório consolidado retornado pelo backend para o conjunto de dados ativo
   RelatorioConsolidado? ultimoRelatorioBackend;
 
-  ///Resultado do último envio em lote de arquivos HTML para o backend.
+  /// Resultado do último envio em lote de arquivos HTML para o backend.
   RelatorioUploadIntegrado? ultimoUploadIntegrado;
 
   static const Map<String, int> _ordemMeses = {
@@ -59,6 +86,7 @@ class SemobDataset {
     final s = <String>{
       ...resumos.map((e) => e.mesAno),
       ...passageiros.map((e) => e.mesAno),
+      ...fcv.map((e) => e.mesAno),
       ...faixasHorarias.map((e) => e.mesAno),
       ...linhas.map((e) => e.mesAno),
     };
@@ -91,6 +119,7 @@ class ResumoDiario {
   final double kmProd;
   final double kmImprod;
   final double kmTotal;
+  final bool calculadoViaDiario;
 
   ResumoDiario({
     required this.mesAno,
@@ -106,7 +135,30 @@ class ResumoDiario {
     required this.kmProd,
     required this.kmImprod,
     required this.kmTotal,
+    this.calculadoViaDiario = false,
   });
+
+  ResumoDiario copiarParaPeriodicidade(
+    String novaPeriodicidade, {
+    bool calculadoViaDiario = true,
+  }) {
+    return ResumoDiario(
+      mesAno: mesAno,
+      periodicidade: novaPeriodicidade,
+      data: data,
+      dateTime: dateTime,
+      weekday: weekday,
+      veiculos: veiculos,
+      maxVeicFaixa: maxVeicFaixa,
+      viagensProg: viagensProg,
+      viagensRealiz: viagensRealiz,
+      difViagens: difViagens,
+      kmProd: kmProd,
+      kmImprod: kmImprod,
+      kmTotal: kmTotal,
+      calculadoViaDiario: calculadoViaDiario,
+    );
+  }
 }
 
 class PassageiroDiario {
@@ -119,6 +171,7 @@ class PassageiroDiario {
   final int antecipados;
   final int naoPagantes;
   final int totalPassageiros;
+  final bool calculadoViaDiario;
 
   PassageiroDiario({
     required this.mesAno,
@@ -130,7 +183,26 @@ class PassageiroDiario {
     required this.antecipados,
     required this.naoPagantes,
     required this.totalPassageiros,
+    this.calculadoViaDiario = false,
   });
+
+  PassageiroDiario copiarParaPeriodicidade(
+    String novaPeriodicidade, {
+    bool calculadoViaDiario = true,
+  }) {
+    return PassageiroDiario(
+      mesAno: mesAno,
+      periodicidade: novaPeriodicidade,
+      data: data,
+      dateTime: dateTime,
+      weekday: weekday,
+      catraca: catraca,
+      antecipados: antecipados,
+      naoPagantes: naoPagantes,
+      totalPassageiros: totalPassageiros,
+      calculadoViaDiario: calculadoViaDiario,
+    );
+  }
 }
 
 class FcvDiario {
@@ -147,6 +219,7 @@ class FcvDiario {
   final int noiteRealiz;
   final int totalProg;
   final int totalRealiz;
+  final bool calculadoViaDiario;
 
   FcvDiario({
     required this.mesAno,
@@ -162,7 +235,30 @@ class FcvDiario {
     required this.noiteRealiz,
     required this.totalProg,
     required this.totalRealiz,
+    this.calculadoViaDiario = false,
   });
+
+  FcvDiario copiarParaPeriodicidade(
+    String novaPeriodicidade, {
+    bool calculadoViaDiario = true,
+  }) {
+    return FcvDiario(
+      mesAno: mesAno,
+      periodicidade: novaPeriodicidade,
+      data: data,
+      dateTime: dateTime,
+      weekday: weekday,
+      manhaProg: manhaProg,
+      manhaRealiz: manhaRealiz,
+      tardeProg: tardeProg,
+      tardeRealiz: tardeRealiz,
+      noiteProg: noiteProg,
+      noiteRealiz: noiteRealiz,
+      totalProg: totalProg,
+      totalRealiz: totalRealiz,
+      calculadoViaDiario: calculadoViaDiario,
+    );
+  }
 }
 
 class FaixaHorariaItem {
@@ -177,6 +273,7 @@ class FaixaHorariaItem {
   final int veiculos;
   final int viagens;
   final String partidas;
+  final bool calculadoViaDiario;
 
   FaixaHorariaItem({
     required this.mesAno,
@@ -190,7 +287,28 @@ class FaixaHorariaItem {
     required this.veiculos,
     required this.viagens,
     required this.partidas,
+    this.calculadoViaDiario = false,
   });
+
+  FaixaHorariaItem copiarParaPeriodicidade(
+    String novaPeriodicidade, {
+    bool calculadoViaDiario = true,
+  }) {
+    return FaixaHorariaItem(
+      mesAno: mesAno,
+      periodicidade: novaPeriodicidade,
+      data: data,
+      dateTime: dateTime,
+      weekday: weekday,
+      linha: linha,
+      hora: hora,
+      faixaTexto: faixaTexto,
+      veiculos: veiculos,
+      viagens: viagens,
+      partidas: partidas,
+      calculadoViaDiario: calculadoViaDiario,
+    );
+  }
 }
 
 class LinhaDiaria {
@@ -203,6 +321,7 @@ class LinhaDiaria {
   final int viagensProg;
   final int viagensRealiz;
   final double kmTotal;
+  final bool calculadoViaDiario;
 
   LinhaDiaria({
     required this.mesAno,
@@ -214,7 +333,26 @@ class LinhaDiaria {
     required this.viagensProg,
     required this.viagensRealiz,
     required this.kmTotal,
+    this.calculadoViaDiario = false,
   });
+
+  LinhaDiaria copiarParaPeriodicidade(
+    String novaPeriodicidade, {
+    bool calculadoViaDiario = true,
+  }) {
+    return LinhaDiaria(
+      mesAno: mesAno,
+      periodicidade: novaPeriodicidade,
+      data: data,
+      dateTime: dateTime,
+      weekday: weekday,
+      linha: linha,
+      viagensProg: viagensProg,
+      viagensRealiz: viagensRealiz,
+      kmTotal: kmTotal,
+      calculadoViaDiario: calculadoViaDiario,
+    );
+  }
 }
 
 class LocalDataLoader {
@@ -228,11 +366,12 @@ class LocalDataLoader {
     final nome = nomeArquivo.toLowerCase().trim();
     if (!nome.endsWith('.html') && !nome.endsWith('.htm')) return false;
 
+    // Arquivos que são exclusivos do backend (microviagens pesadas, ocorrências contratuais, saldos bancários)
+    // são mantidos na lista de envio para o MongoDB, dispensando parsing gráfico local em Dart:
     if (nome.contains('_viagens') ||
         nome.contains('nrealiz') ||
         nome.contains('nterm') ||
         nome.contains('ninic') ||
-        nome.contains('resumo_fxhr') ||
         nome.contains('saldos')) {
       return false;
     }
@@ -241,11 +380,12 @@ class LocalDataLoader {
         nome.contains('fcv') ||
         nome.contains('fxhr') ||
         nome.contains('fx_hr') ||
-        nome.contains('linhas')) {
-      return true;
-    }
-
-    if (RegExp(r'(mensal|quinzenal)[_\s-]*\d{6}').hasMatch(nome)) {
+        nome.contains('resumo_fxhr') ||
+        nome.contains('linha') ||
+        nome.contains('mensal') ||
+        nome.contains('quinzenal') ||
+        nome.contains('resumo') ||
+        nome.contains('operacional')) {
       return true;
     }
 
@@ -265,17 +405,20 @@ class LocalDataLoader {
     return partes.isNotEmpty ? partes.last : 'Pasta';
   }
 
-  static Future<SemobDataset> carregarPasta(String caminhoEscolhido) async {
-    final dataset = SemobDataset();
-    if (kIsWeb) return dataset;
+  /// Abre o seletor nativo de pastas na Web (`webkitdirectory`) e retorna os arquivos `.html`/`.htm` encontrados.
+  static Future<List<ArquivoLido>> selecionarArquivosDaPastaWeb() {
+    return selecionarPastaWeb(arquivoEhHtmlSuportado);
+  }
 
-    final arquivosLidos = await escanearPastaNativa(
-      caminhoEscolhido,
-      arquivoEhHtmlSuportado,
-    );
-
+  /// Processa uma lista de `ArquivoLido` já escaneados (de uma pasta nativa ou Web) e mescla no `SemobDataset`.
+  static SemobDataset carregarListaArquivosLidos(
+    List<ArquivoLido> arquivosLidos, {
+    SemobDataset? datasetExistente,
+  }) {
+    final dataset = datasetExistente ?? SemobDataset();
     for (final arq in arquivosLidos) {
-      dataset.arquivosHtmlCarregados.add(arq);
+      if (!arquivoEhHtmlSuportado(arq.nome) || arq.bytes.isEmpty) continue;
+      _registrarArquivoHtmlUnico(dataset, arq);
       if (arquivoEhRelatorioUtil(arq.nome)) {
         _processarArquivoIndividual(
           nomeArquivo: arq.nome,
@@ -285,47 +428,577 @@ class LocalDataLoader {
         );
       }
     }
-
+    reconciliarDerivacoesDiarias(dataset);
     return dataset;
   }
 
-  static Future<SemobDataset> carregarArquivosSelecionados(List<dynamic> files) async {
-    final dataset = SemobDataset();
+  /// Carrega uma pasta nativa e mescla (ou cria) o `SemobDataset`,
+  /// calculando automaticamente visões Quinzenais/Mensais ausentes a partir dos diários
+  /// e validando sobreposições sem duplicar nem perder dados.
+  static Future<SemobDataset> carregarPasta(
+    String caminhoEscolhido, {
+    SemobDataset? datasetExistente,
+  }) async {
+    final dataset = datasetExistente ?? SemobDataset();
+    if (kIsWeb) return dataset;
+
+    final arquivosLidos = await escanearPastaNativa(
+      caminhoEscolhido,
+      arquivoEhHtmlSuportado,
+    );
+
+    return carregarListaArquivosLidos(
+      arquivosLidos,
+      datasetExistente: dataset,
+    );
+  }
+
+  /// Carrega um ou mais arquivos HTML selecionados pelo usuário (juntos, um por um ou em ordem aleatória),
+  /// preservando dados anteriores em `datasetExistente`, reconciliando sobreposições e derivando
+  /// automaticamente Quinzenal/Mensal a partir dos registros diários quando ausentes.
+  static Future<SemobDataset> carregarArquivosSelecionados(
+    List<dynamic> files, {
+    SemobDataset? datasetExistente,
+  }) async {
+    final dataset = datasetExistente ?? SemobDataset();
     for (final arquivo in files) {
       try {
-        final String nome = arquivo.name?.toString() ?? 'relatorio.html';
-        if (!arquivoEhHtmlSuportado(nome)) continue;
+        final arqLido = await _extrairArquivoLido(arquivo);
+        if (arqLido == null) continue;
 
-        final List<int> bytes = await arquivo.readAsBytes();
-        String caminho = nome;
-        if (!kIsWeb) {
-          try {
-            caminho = arquivo.path?.toString() ?? nome;
-          } catch (_) {}
-        }
+        _registrarArquivoHtmlUnico(dataset, arqLido);
 
-        dataset.arquivosHtmlCarregados.add(
-          ArquivoLido(
-            nome: nome,
-            caminho: caminho,
-            bytes: bytes,
-          ),
-        );
-
-        if (arquivoEhRelatorioUtil(nome)) {
+        if (arquivoEhRelatorioUtil(arqLido.nome)) {
           _processarArquivoIndividual(
-            nomeArquivo: nome,
-            caminhoCompleto: caminho,
-            bytes: bytes,
+            nomeArquivo: arqLido.nome,
+            caminhoCompleto: arqLido.caminho,
+            bytes: arqLido.bytes,
             dataset: dataset,
           );
         }
       } catch (_) {}
     }
+
+    reconciliarDerivacoesDiarias(dataset);
     return dataset;
   }
 
-  ///Envia um único `ArquivoLido` para o backend processar e salvar no MongoDB.
+  /// Extrai nome, caminho e bytes de qualquer objeto de arquivo (`PlatformFile`, `XFile`, `ArquivoLido` ou mock).
+  static Future<ArquivoLido?> _extrairArquivoLido(dynamic arquivo) async {
+    if (arquivo is ArquivoLido) {
+      if (!arquivoEhHtmlSuportado(arquivo.nome) || arquivo.bytes.isEmpty) return null;
+      return arquivo;
+    }
+
+    String nome = 'relatorio.html';
+    try {
+      final n = arquivo.name?.toString();
+      if (n != null && n.isNotEmpty) nome = n;
+    } catch (_) {}
+
+    if (!arquivoEhHtmlSuportado(nome)) return null;
+
+    String caminho = nome;
+    if (!kIsWeb) {
+      try {
+        final p = arquivo.path?.toString();
+        if (p != null && p.isNotEmpty) caminho = p;
+      } catch (_) {}
+    }
+
+    List<int>? bytes;
+
+    // 1. Tenta ler propriedade `.bytes` (PlatformFile do file_picker com withData: true)
+    try {
+      final rawBytes = arquivo.bytes;
+      if (rawBytes is List<int> && rawBytes.isNotEmpty) {
+        bytes = rawBytes;
+      }
+    } catch (_) {}
+
+    // 2. Tenta ler via `.xFile.readAsBytes()` (PlatformFile no file_picker 8+/13+)
+    if (bytes == null || bytes.isEmpty) {
+      try {
+        final xf = arquivo.xFile;
+        if (xf != null) {
+          final lidos = await xf.readAsBytes();
+          if (lidos is List<int> && lidos.isNotEmpty) {
+            bytes = lidos;
+          }
+        }
+      } catch (_) {}
+    }
+
+    // 3. Tenta ler via `.readAsBytes()` direto (XFile ou mock de teste)
+    if (bytes == null || bytes.isEmpty) {
+      try {
+        final lidos = await arquivo.readAsBytes();
+        if (lidos is List<int> && lidos.isNotEmpty) {
+          bytes = lidos;
+        }
+      } catch (_) {}
+    }
+
+    // 4. Fallback nativo via caminho no disco (Windows/Linux/macOS/Android)
+    if ((bytes == null || bytes.isEmpty) && !kIsWeb && caminho != nome) {
+      try {
+        final lidosDisco = await lerArquivoNativoPorCaminho(caminho);
+        if (lidosDisco.isNotEmpty) {
+          bytes = lidosDisco;
+        }
+      } catch (_) {}
+    }
+
+    if (bytes == null || bytes.isEmpty) return null;
+
+    return ArquivoLido(
+      nome: nome,
+      caminho: caminho,
+      bytes: bytes,
+    );
+  }
+
+  static void _registrarArquivoHtmlUnico(SemobDataset ds, ArquivoLido novo) {
+    final idx = ds.arquivosHtmlCarregados.indexWhere(
+      (a) =>
+          a.caminho.toLowerCase() == novo.caminho.toLowerCase() ||
+          a.nome.toLowerCase() == novo.nome.toLowerCase(),
+    );
+    if (idx >= 0) {
+      ds.arquivosHtmlCarregados[idx] = novo;
+    } else {
+      ds.arquivosHtmlCarregados.add(novo);
+    }
+  }
+
+  /// Calcula automaticamente as visões `Quinzenal` e `Mensal` a partir dos registros diários
+  /// quando o usuário possui apenas uma das periodicidades carregadas.
+  static void reconciliarDerivacoesDiarias(SemobDataset ds) {
+    const periodicidadesAlvo = ['Mensal', 'Quinzenal'];
+
+    //Resumos Diários
+    final resumosSnapshot = List<ResumoDiario>.from(ds.resumos);
+    for (final item in resumosSnapshot) {
+      for (final perAlvo in periodicidadesAlvo) {
+        if (item.periodicidade == perAlvo) continue;
+        final jaExiste = ds.resumos.any(
+          (r) => r.data == item.data && r.periodicidade == perAlvo,
+        );
+        if (!jaExiste) {
+          ds.resumos.add(item.copiarParaPeriodicidade(perAlvo, calculadoViaDiario: true));
+          ds.registrosDerivadosViaDiario++;
+        }
+      }
+    }
+
+    //Passageiros Diários
+    final passSnapshot = List<PassageiroDiario>.from(ds.passageiros);
+    for (final item in passSnapshot) {
+      for (final perAlvo in periodicidadesAlvo) {
+        if (item.periodicidade == perAlvo) continue;
+        final jaExiste = ds.passageiros.any(
+          (p) => p.data == item.data && p.periodicidade == perAlvo,
+        );
+        if (!jaExiste) {
+          ds.passageiros.add(item.copiarParaPeriodicidade(perAlvo, calculadoViaDiario: true));
+          ds.registrosDerivadosViaDiario++;
+        }
+      }
+    }
+
+    //FCV por Turno
+    final fcvSnapshot = List<FcvDiario>.from(ds.fcv);
+    for (final item in fcvSnapshot) {
+      for (final perAlvo in periodicidadesAlvo) {
+        if (item.periodicidade == perAlvo) continue;
+        final jaExiste = ds.fcv.any(
+          (f) => f.data == item.data && f.periodicidade == perAlvo,
+        );
+        if (!jaExiste) {
+          ds.fcv.add(item.copiarParaPeriodicidade(perAlvo, calculadoViaDiario: true));
+          ds.registrosDerivadosViaDiario++;
+        }
+      }
+    }
+
+    //Faixas Horárias
+    final fxSnapshot = List<FaixaHorariaItem>.from(ds.faixasHorarias);
+    for (final item in fxSnapshot) {
+      for (final perAlvo in periodicidadesAlvo) {
+        if (item.periodicidade == perAlvo) continue;
+        final jaExiste = ds.faixasHorarias.any(
+          (f) =>
+              f.data == item.data &&
+              f.linha == item.linha &&
+              f.hora == item.hora &&
+              f.periodicidade == perAlvo,
+        );
+        if (!jaExiste) {
+          ds.faixasHorarias.add(item.copiarParaPeriodicidade(perAlvo, calculadoViaDiario: true));
+          ds.registrosDerivadosViaDiario++;
+        }
+      }
+    }
+
+    //Linhas Diárias
+    final linhasSnapshot = List<LinhaDiaria>.from(ds.linhas);
+    for (final item in linhasSnapshot) {
+      for (final perAlvo in periodicidadesAlvo) {
+        if (item.periodicidade == perAlvo) continue;
+        final jaExiste = ds.linhas.any(
+          (l) => l.data == item.data && l.linha == item.linha && l.periodicidade == perAlvo,
+        );
+        if (!jaExiste) {
+          ds.linhas.add(item.copiarParaPeriodicidade(perAlvo, calculadoViaDiario: true));
+          ds.registrosDerivadosViaDiario++;
+        }
+      }
+    }
+  }
+
+  static void _registrarDiscrepanciaUnica(SemobDataset ds, DiscrepanciaConsolidacao nova) {
+    final jaRegistrada = ds.discrepanciasDetectadas.any(
+      (d) =>
+          d.data == nova.data &&
+          d.categoria == nova.categoria &&
+          d.descricao == nova.descricao,
+    );
+    if (!jaRegistrada) {
+      ds.discrepanciasDetectadas.add(nova);
+    }
+  }
+
+  static void _inserirOuReconciliarResumo(SemobDataset ds, ResumoDiario novo) {
+    final idxMesmaPer = ds.resumos.indexWhere(
+      (r) => r.data == novo.data && r.periodicidade == novo.periodicidade,
+    );
+    final idxOutraPer = ds.resumos.indexWhere(
+      (r) => r.data == novo.data && r.periodicidade != novo.periodicidade,
+    );
+
+    final referencia = idxMesmaPer >= 0
+        ? ds.resumos[idxMesmaPer]
+        : (idxOutraPer >= 0 ? ds.resumos[idxOutraPer] : null);
+
+    if (referencia != null) {
+      final rotuloRef = referencia.calculadoViaDiario ? 'diário' : 'base';
+      final diffs = <String>[];
+      if (referencia.viagensProg > 0 && novo.viagensProg > 0 && referencia.viagensProg != novo.viagensProg) {
+        diffs.add('Viagens Prog.: $rotuloRef=${referencia.viagensProg} vs ${novo.periodicidade}=${novo.viagensProg}');
+      }
+      if (referencia.viagensRealiz > 0 && novo.viagensRealiz > 0 && referencia.viagensRealiz != novo.viagensRealiz) {
+        diffs.add('Viagens Realiz.: $rotuloRef=${referencia.viagensRealiz} vs ${novo.periodicidade}=${novo.viagensRealiz}');
+      }
+      final viagensEKmIdenticos = referencia.viagensProg == novo.viagensProg &&
+          referencia.viagensRealiz == novo.viagensRealiz &&
+          (referencia.kmTotal - novo.kmTotal).abs() <= 0.05;
+      final eraFrotaParcialPorFaixa = !referencia.calculadoViaDiario &&
+          viagensEKmIdenticos &&
+          referencia.veiculos == referencia.maxVeicFaixa &&
+          novo.veiculos > referencia.veiculos;
+      if (!eraFrotaParcialPorFaixa &&
+          referencia.veiculos > 0 &&
+          novo.veiculos > 0 &&
+          referencia.veiculos != novo.veiculos) {
+        diffs.add('Frota: $rotuloRef=${referencia.veiculos} vs ${novo.periodicidade}=${novo.veiculos}');
+      }
+      if (referencia.kmTotal > 0 && novo.kmTotal > 0 && (referencia.kmTotal - novo.kmTotal).abs() > 0.05) {
+        diffs.add(
+          'KM Total: $rotuloRef=${referencia.kmTotal.toStringAsFixed(2)} vs ${novo.periodicidade}=${novo.kmTotal.toStringAsFixed(2)}',
+        );
+      }
+
+      if (diffs.isEmpty) {
+        // Dados idênticos (ou enriquecimento de campo parcial): ignora duplicação e promove para confirmado
+        ds.registrosIdenticosIgnorados++;
+        if (idxMesmaPer >= 0) {
+          if (ds.resumos[idxMesmaPer].calculadoViaDiario ||
+              ds.resumos[idxMesmaPer].veiculos != novo.veiculos ||
+              ds.resumos[idxMesmaPer].maxVeicFaixa != novo.maxVeicFaixa) {
+            ds.resumos[idxMesmaPer] = novo;
+          }
+          return;
+        }
+      } else {
+        final origemBase = referencia.calculadoViaDiario
+            ? 'Cálculo via Diários'
+            : 'Base ${referencia.periodicidade}';
+        _registrarDiscrepanciaUnica(
+          ds,
+          DiscrepanciaConsolidacao(
+            data: novo.data,
+            categoria: 'Resumo Operacional',
+            periodicidadeNova: novo.periodicidade,
+            periodicidadeBase: origemBase,
+            descricao:
+                'O HTML ${novo.periodicidade} divergiu de $origemBase em ${novo.data} (${diffs.join(" | ")}).',
+          ),
+        );
+      }
+    }
+
+    if (idxMesmaPer >= 0) {
+      ds.resumos[idxMesmaPer] = novo;
+    } else {
+      ds.resumos.add(novo);
+    }
+  }
+
+  static void _inserirOuReconciliarPassageiro(SemobDataset ds, PassageiroDiario novo) {
+    final idxMesmaPer = ds.passageiros.indexWhere(
+      (p) => p.data == novo.data && p.periodicidade == novo.periodicidade,
+    );
+    final idxOutraPer = ds.passageiros.indexWhere(
+      (p) => p.data == novo.data && p.periodicidade != novo.periodicidade,
+    );
+
+    final referencia = idxMesmaPer >= 0
+        ? ds.passageiros[idxMesmaPer]
+        : (idxOutraPer >= 0 ? ds.passageiros[idxOutraPer] : null);
+
+    if (referencia != null) {
+      final rotuloRef = referencia.calculadoViaDiario ? 'diário' : 'base';
+      final diffs = <String>[];
+      // Quando a base vem consolidada com pagantes = catraca + antecipados (antecipados=0),
+      // reconcilia sem falso alerta se a soma de pagantes for idêntica.
+      final pagantesConsolidadosIguais =
+          ((referencia.antecipados == 0 && novo.antecipados > 0) ||
+              (novo.antecipados == 0 && referencia.antecipados > 0)) &&
+          (referencia.catraca + referencia.antecipados) == (novo.catraca + novo.antecipados);
+
+      if (!pagantesConsolidadosIguais && referencia.catraca != novo.catraca) {
+        diffs.add('Catraca: $rotuloRef=${referencia.catraca} vs ${novo.periodicidade}=${novo.catraca}');
+      }
+      if (referencia.naoPagantes != novo.naoPagantes) {
+        diffs.add('Gratuitos: $rotuloRef=${referencia.naoPagantes} vs ${novo.periodicidade}=${novo.naoPagantes}');
+      }
+      if (referencia.totalPassageiros != novo.totalPassageiros) {
+        diffs.add(
+          'Total Passageiros: $rotuloRef=${referencia.totalPassageiros} vs ${novo.periodicidade}=${novo.totalPassageiros}',
+        );
+      }
+
+      if (diffs.isEmpty) {
+        ds.registrosIdenticosIgnorados++;
+        if (idxMesmaPer >= 0) {
+          if (ds.passageiros[idxMesmaPer].calculadoViaDiario ||
+              (ds.passageiros[idxMesmaPer].antecipados == 0 && novo.antecipados > 0)) {
+            ds.passageiros[idxMesmaPer] = novo;
+          }
+          return;
+        }
+      } else {
+        final origemBase = referencia.calculadoViaDiario
+            ? 'Cálculo via Diários'
+            : 'Base ${referencia.periodicidade}';
+        _registrarDiscrepanciaUnica(
+          ds,
+          DiscrepanciaConsolidacao(
+            data: novo.data,
+            categoria: 'Passageiros',
+            periodicidadeNova: novo.periodicidade,
+            periodicidadeBase: origemBase,
+            descricao:
+                'O HTML ${novo.periodicidade} de Passageiros divergiu de $origemBase em ${novo.data} (${diffs.join(" | ")}).',
+          ),
+        );
+      }
+    }
+
+    if (idxMesmaPer >= 0) {
+      ds.passageiros[idxMesmaPer] = novo;
+    } else {
+      ds.passageiros.add(novo);
+    }
+  }
+
+  static void _inserirOuReconciliarFcv(SemobDataset ds, FcvDiario novo) {
+    final idxMesmaPer = ds.fcv.indexWhere(
+      (f) => f.data == novo.data && f.periodicidade == novo.periodicidade,
+    );
+    final idxOutraPer = ds.fcv.indexWhere(
+      (f) => f.data == novo.data && f.periodicidade != novo.periodicidade,
+    );
+
+    final referencia = idxMesmaPer >= 0
+        ? ds.fcv[idxMesmaPer]
+        : (idxOutraPer >= 0 ? ds.fcv[idxOutraPer] : null);
+
+    if (referencia != null) {
+      final qtdNaoDerivados = ds.fcv.where((f) => !f.calculadoViaDiario && f.periodicidade == referencia.periodicidade).length;
+      final eraAgregadoMensalSintetico = qtdNaoDerivados == 1 && referencia.totalProg > novo.totalProg * 2;
+
+      if (!eraAgregadoMensalSintetico) {
+        final rotuloRef = referencia.calculadoViaDiario ? 'diário' : 'base';
+        final diffs = <String>[];
+        if (referencia.totalProg != novo.totalProg || referencia.totalRealiz != novo.totalRealiz) {
+          diffs.add(
+            'Total FCV: $rotuloRef=${referencia.totalRealiz}/${referencia.totalProg} vs ${novo.periodicidade}=${novo.totalRealiz}/${novo.totalProg}',
+          );
+        }
+        if (referencia.manhaRealiz != novo.manhaRealiz ||
+            referencia.tardeRealiz != novo.tardeRealiz ||
+            referencia.noiteRealiz != novo.noiteRealiz) {
+          diffs.add(
+            'Turnos (M/T/N): $rotuloRef=${referencia.manhaRealiz}/${referencia.tardeRealiz}/${referencia.noiteRealiz} vs ${novo.periodicidade}=${novo.manhaRealiz}/${novo.tardeRealiz}/${novo.noiteRealiz}',
+          );
+        }
+
+        if (diffs.isEmpty) {
+          ds.registrosIdenticosIgnorados++;
+          if (idxMesmaPer >= 0) {
+            if (ds.fcv[idxMesmaPer].calculadoViaDiario) {
+              ds.fcv[idxMesmaPer] = novo;
+            }
+            return;
+          }
+        } else {
+          final origemBase = referencia.calculadoViaDiario
+              ? 'Cálculo via Diários'
+              : 'Base ${referencia.periodicidade}';
+          _registrarDiscrepanciaUnica(
+            ds,
+            DiscrepanciaConsolidacao(
+              data: novo.data,
+              categoria: 'FCV por Período',
+              periodicidadeNova: novo.periodicidade,
+              periodicidadeBase: origemBase,
+              descricao:
+                  'O HTML ${novo.periodicidade} de FCV divergiu de $origemBase em ${novo.data} (${diffs.join(" | ")}).',
+            ),
+          );
+        }
+      }
+    }
+
+    if (idxMesmaPer >= 0) {
+      ds.fcv[idxMesmaPer] = novo;
+    } else {
+      ds.fcv.add(novo);
+    }
+  }
+
+  static void _inserirOuReconciliarFxHr(SemobDataset ds, FaixaHorariaItem novo) {
+    final idxMesmaPer = ds.faixasHorarias.indexWhere(
+      (f) =>
+          f.data == novo.data &&
+          f.linha == novo.linha &&
+          f.hora == novo.hora &&
+          f.periodicidade == novo.periodicidade,
+    );
+    final idxOutraPer = ds.faixasHorarias.indexWhere(
+      (f) =>
+          f.data == novo.data &&
+          f.linha == novo.linha &&
+          f.hora == novo.hora &&
+          f.periodicidade != novo.periodicidade,
+    );
+
+    final referencia = idxMesmaPer >= 0
+        ? ds.faixasHorarias[idxMesmaPer]
+        : (idxOutraPer >= 0 ? ds.faixasHorarias[idxOutraPer] : null);
+
+    if (referencia != null) {
+      final diffs = <String>[];
+      if (referencia.viagens != novo.viagens) {
+        diffs.add('Viagens (${novo.hora}h L${novo.linha}): diário=${referencia.viagens} vs ${novo.periodicidade}=${novo.viagens}');
+      }
+      if (referencia.veiculos != novo.veiculos) {
+        diffs.add('Veículos (${novo.hora}h L${novo.linha}): diário=${referencia.veiculos} vs ${novo.periodicidade}=${novo.veiculos}');
+      }
+
+      if (diffs.isEmpty) {
+        ds.registrosIdenticosIgnorados++;
+        if (idxMesmaPer >= 0) {
+          if (ds.faixasHorarias[idxMesmaPer].calculadoViaDiario) {
+            ds.faixasHorarias[idxMesmaPer] = novo;
+          }
+          return;
+        }
+      } else {
+        final origemBase = referencia.calculadoViaDiario
+            ? 'Cálculo via Diários'
+            : 'Base ${referencia.periodicidade}';
+        _registrarDiscrepanciaUnica(
+          ds,
+          DiscrepanciaConsolidacao(
+            data: novo.data,
+            categoria: 'Faixa Horária (Linha ${novo.linha})',
+            periodicidadeNova: novo.periodicidade,
+            periodicidadeBase: origemBase,
+            descricao:
+                'O HTML ${novo.periodicidade} de Faixa Horária divergiu de $origemBase em ${novo.data} (${diffs.join(" | ")}).',
+          ),
+        );
+      }
+    }
+
+    if (idxMesmaPer >= 0) {
+      ds.faixasHorarias[idxMesmaPer] = novo;
+    } else {
+      ds.faixasHorarias.add(novo);
+    }
+  }
+
+  static void _inserirOuReconciliarLinha(SemobDataset ds, LinhaDiaria novo) {
+    final idxMesmaPer = ds.linhas.indexWhere(
+      (l) => l.data == novo.data && l.linha == novo.linha && l.periodicidade == novo.periodicidade,
+    );
+    final idxOutraPer = ds.linhas.indexWhere(
+      (l) => l.data == novo.data && l.linha == novo.linha && l.periodicidade != novo.periodicidade,
+    );
+
+    final referencia = idxMesmaPer >= 0
+        ? ds.linhas[idxMesmaPer]
+        : (idxOutraPer >= 0 ? ds.linhas[idxOutraPer] : null);
+
+    if (referencia != null) {
+      final diffs = <String>[];
+      if (referencia.viagensRealiz != novo.viagensRealiz) {
+        diffs.add(
+          'Viagens (Linha ${novo.linha}): diário=${referencia.viagensRealiz} vs ${novo.periodicidade}=${novo.viagensRealiz}',
+        );
+      }
+      if ((referencia.kmTotal - novo.kmTotal).abs() > 0.05) {
+        diffs.add(
+          'KM (Linha ${novo.linha}): diário=${referencia.kmTotal.toStringAsFixed(2)} vs ${novo.periodicidade}=${novo.kmTotal.toStringAsFixed(2)}',
+        );
+      }
+
+      if (diffs.isEmpty) {
+        ds.registrosIdenticosIgnorados++;
+        if (idxMesmaPer >= 0) {
+          if (ds.linhas[idxMesmaPer].calculadoViaDiario) {
+            ds.linhas[idxMesmaPer] = novo;
+          }
+          return;
+        }
+      } else {
+        final origemBase = referencia.calculadoViaDiario
+            ? 'Cálculo via Diários'
+            : 'Base ${referencia.periodicidade}';
+        _registrarDiscrepanciaUnica(
+          ds,
+          DiscrepanciaConsolidacao(
+            data: novo.data,
+            categoria: 'Linha ${novo.linha}',
+            periodicidadeNova: novo.periodicidade,
+            periodicidadeBase: origemBase,
+            descricao:
+                'O HTML ${novo.periodicidade} de Linhas divergiu de $origemBase em ${novo.data} (${diffs.join(" | ")}).',
+          ),
+        );
+      }
+    }
+
+    if (idxMesmaPer >= 0) {
+      ds.linhas[idxMesmaPer] = novo;
+    } else {
+      ds.linhas.add(novo);
+    }
+  }
+
+  /// Envia um único `ArquivoLido` para o backend processar e salvar no MongoDB.
   static Future<ResultadoProcessamentoHtml> enviarArquivoIndividualParaBackend(
     ArquivoLido arquivo, {
     bool persistirNoBanco = true,
@@ -337,9 +1010,9 @@ class LocalDataLoader {
     );
   }
 
-  ///Sincroniza os arquivos HTML carregados no `dataset` com o backend e retorna o
-  ///`RelatorioConsolidado` gerado pelo servidor. Caso nenhum arquivo local esteja em memória,
-  ///solicita o relatório consolidado diretamente do banco de dados do backend
+  /// Sincroniza os arquivos HTML carregados no `dataset` com o backend e retorna o
+  /// `RelatorioConsolidado` gerado pelo servidor. Caso nenhum arquivo local esteja em memória,
+  /// solicita o relatório consolidado diretamente do banco de dados do backend
   static Future<RelatorioConsolidado> sincronizarEGerarRelatorio({
     required SemobDataset dataset,
     String agrupamento = 'diario',
@@ -407,11 +1080,16 @@ class LocalDataLoader {
       _parsePassageiros(htmlStr, mesAno, periodicidade, dataset);
     } else if (nome.contains('fcv')) {
       _parseFcv(htmlStr, mesAno, periodicidade, dataset);
-    } else if (nome.contains('fxhr') || nome.contains('fx_hr')) {
+    } else if (nome.contains('fxhr') || nome.contains('fx_hr') || nome.contains('resumo_fxhr')) {
       _parseFxHr(htmlStr, mesAno, periodicidade, dataset);
-    } else if (nome.contains('linhas')) {
+    } else if (nome.contains('linha')) {
       _parseLinhas(htmlStr, mesAno, periodicidade, dataset);
-    } else if (RegExp(r'(mensal|quinzenal)[_\s-]*\d{6}').hasMatch(nome)) {
+    } else if (nome.contains('mensal') ||
+        nome.contains('quinzenal') ||
+        nome.contains('resumo') ||
+        nome.contains('operacional') ||
+        htmlStr.contains('nrViagensProg') ||
+        htmlStr.contains('kmProd')) {
       _parseResumoGeral(htmlStr, mesAno, periodicidade, dataset);
     }
   }
@@ -433,7 +1111,10 @@ class LocalDataLoader {
 
   static List<List<String>> _extrairLinhasTabelaDados(String htmlContent, int minCols) {
     final doc = html_parser.parse(htmlContent);
-    final tabelas = doc.querySelectorAll('table.data');
+    var tabelas = doc.querySelectorAll('table.data');
+    if (tabelas.isEmpty) {
+      tabelas = doc.querySelectorAll('table');
+    }
     final resultado = <List<String>>[];
 
     for (final tab in tabelas) {
@@ -464,21 +1145,24 @@ class LocalDataLoader {
     for (final r in rows) {
       final dt = _parseDataBR(r[0]);
       if (dt == null) continue;
-      ds.resumos.add(ResumoDiario(
-        mesAno: mesAno,
-        periodicidade: per,
-        data: r[0],
-        dateTime: dt,
-        weekday: dt.weekday,
-        veiculos: _toInt(r[2]),
-        maxVeicFaixa: _toInt(r[3]),
-        viagensProg: _toInt(r[4]),
-        viagensRealiz: _toInt(r[5]),
-        difViagens: _toInt(r[6]),
-        kmProd: _toDouble(r[7]),
-        kmImprod: _toDouble(r[8]),
-        kmTotal: _toDouble(r[9]),
-      ));
+      _inserirOuReconciliarResumo(
+        ds,
+        ResumoDiario(
+          mesAno: mesAno,
+          periodicidade: per,
+          data: r[0],
+          dateTime: dt,
+          weekday: dt.weekday,
+          veiculos: _toInt(r[2]),
+          maxVeicFaixa: _toInt(r[3]),
+          viagensProg: _toInt(r[4]),
+          viagensRealiz: _toInt(r[5]),
+          difViagens: _toInt(r[6]),
+          kmProd: _toDouble(r[7]),
+          kmImprod: _toDouble(r[8]),
+          kmTotal: _toDouble(r[9]),
+        ),
+      );
     }
   }
 
@@ -498,17 +1182,20 @@ class LocalDataLoader {
       if (match.group(2) == '08') mesLabel = 'Agosto/2026';
       if (match.group(2) == '09') mesLabel = 'Setembro/2026';
 
-      ds.passageiros.add(PassageiroDiario(
-        mesAno: mesLabel,
-        periodicidade: per,
-        data: dataBR,
-        dateTime: dt,
-        weekday: dt.weekday,
-        catraca: _toInt(r[2]),
-        antecipados: _toInt(r[3]),
-        naoPagantes: _toInt(r[4]),
-        totalPassageiros: _toInt(r[5]),
-      ));
+      _inserirOuReconciliarPassageiro(
+        ds,
+        PassageiroDiario(
+          mesAno: mesLabel,
+          periodicidade: per,
+          data: dataBR,
+          dateTime: dt,
+          weekday: dt.weekday,
+          catraca: _toInt(r[2]),
+          antecipados: _toInt(r[3]),
+          naoPagantes: _toInt(r[4]),
+          totalPassageiros: _toInt(r[5]),
+        ),
+      );
     }
   }
 
@@ -517,44 +1204,65 @@ class LocalDataLoader {
     for (final r in rows) {
       final dt = _parseDataBR(r[0]);
       if (dt == null) continue;
-      ds.fcv.add(FcvDiario(
-        mesAno: mesAno,
-        periodicidade: per,
-        data: r[0],
-        dateTime: dt,
-        weekday: dt.weekday,
-        manhaProg: _toInt(r[1]),
-        manhaRealiz: _toInt(r[2]),
-        tardeProg: _toInt(r[3]),
-        tardeRealiz: _toInt(r[4]),
-        noiteProg: _toInt(r[5]),
-        noiteRealiz: _toInt(r[6]),
-        totalProg: _toInt(r[7]),
-        totalRealiz: _toInt(r[8]),
-      ));
+      _inserirOuReconciliarFcv(
+        ds,
+        FcvDiario(
+          mesAno: mesAno,
+          periodicidade: per,
+          data: r[0],
+          dateTime: dt,
+          weekday: dt.weekday,
+          manhaProg: _toInt(r[1]),
+          manhaRealiz: _toInt(r[2]),
+          tardeProg: _toInt(r[3]),
+          tardeRealiz: _toInt(r[4]),
+          noiteProg: _toInt(r[5]),
+          noiteRealiz: _toInt(r[6]),
+          totalProg: _toInt(r[7]),
+          totalRealiz: _toInt(r[8]),
+        ),
+      );
     }
   }
 
   static void _parseFxHr(String html, String mesAno, String per, SemobDataset ds) {
     final rows = _extrairLinhasTabelaDados(html, 6);
     for (final r in rows) {
-      final dt = _parseDataBR(r[0]);
+      DateTime? dt = _parseDataBR(r[0]);
+      String dataStr = r[0];
+      String linhaStr = r[1];
+      String fx = r.length > 2 ? r[2] : '';
+      int idxVeic = 3;
+      int idxViag = 4;
+      int idxPart = 5;
+
+      if (dt == null && r.length > 1) {
+        dt = _parseDataBR(r[1]);
+        if (dt != null) {
+          dataStr = r[1];
+          linhaStr = r[0];
+          fx = r.length > 2 ? r[2] : '';
+        }
+      }
       if (dt == null) continue;
-      final fx = r[2];
+
       final hora = int.tryParse(fx.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
-      ds.faixasHorarias.add(FaixaHorariaItem(
-        mesAno: mesAno,
-        periodicidade: per,
-        data: r[0],
-        dateTime: dt,
-        weekday: dt.weekday,
-        linha: r[1].padLeft(2, '0'),
-        hora: hora,
-        faixaTexto: fx,
-        veiculos: _toInt(r[3]),
-        viagens: _toInt(r[4]),
-        partidas: r[5],
-      ));
+      _inserirOuReconciliarFxHr(
+        ds,
+        FaixaHorariaItem(
+          mesAno: mesAno,
+          periodicidade: per,
+          data: dataStr,
+          dateTime: dt,
+          weekday: dt.weekday,
+          linha: linhaStr.padLeft(2, '0'),
+          hora: hora,
+          faixaTexto: fx,
+          veiculos: r.length > idxVeic ? _toInt(r[idxVeic]) : 0,
+          viagens: r.length > idxViag ? _toInt(r[idxViag]) : 0,
+          partidas: r.length > idxPart ? r[idxPart] : '',
+        ),
+      );
     }
   }
 
@@ -584,17 +1292,20 @@ class LocalDataLoader {
         final prog = idxProg != -1 ? _toInt(tds[idxProg]) : real;
         final km = idxKm != -1 ? _toDouble(tds[idxKm]) : 0.0;
 
-        ds.linhas.add(LinhaDiaria(
-          mesAno: mesAno,
-          periodicidade: per,
-          data: tds[idxData],
-          dateTime: dt,
-          weekday: dt.weekday,
-          linha: tds[idxLinha].padLeft(2, '0'),
-          viagensProg: prog,
-          viagensRealiz: real,
-          kmTotal: km,
-        ));
+        _inserirOuReconciliarLinha(
+          ds,
+          LinhaDiaria(
+            mesAno: mesAno,
+            periodicidade: per,
+            data: tds[idxData],
+            dateTime: dt,
+            weekday: dt.weekday,
+            linha: tds[idxLinha].padLeft(2, '0'),
+            viagensProg: prog,
+            viagensRealiz: real,
+            kmTotal: km,
+          ),
+        );
       }
     }
   }

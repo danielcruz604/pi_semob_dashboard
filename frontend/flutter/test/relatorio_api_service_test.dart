@@ -1,8 +1,10 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:semob_dashboard/local_data_loader.dart';
+import 'package:semob_dashboard/utils/export_service.dart';
 
 Map<String, dynamic> _mockRelatorioJson() => {
       'gerado_em': '2026-10-21T12:00:00Z',
@@ -141,6 +143,17 @@ Map<String, dynamic> _mockRelatorioJson() => {
         ],
       },
     };
+
+class _FakePickedFile {
+  final String name;
+  final String path;
+  final List<int> _bytes;
+
+  _FakePickedFile({required this.name, required this.path, required String html})
+      : _bytes = utf8.encode(html);
+
+  Future<List<int>> readAsBytes() async => _bytes;
+}
 
 void main() {
   tearDown(() {
@@ -323,5 +336,443 @@ void main() {
     expect(controller.isLoading, isFalse);
     expect(controller.errorMessage, 'Banco de dados indisponível no momento.');
     expect(erroCapturado, 'Banco de dados indisponível no momento.');
+  });
+
+  test('LocalDataLoader.carregarArquivosSelecionados processa HTML selecionado pelo botao do Flutter', () async {
+    const htmlMensal = '''
+      <html><body>
+        <table class="data">
+          <tr>
+            <th>Data</th><th>Dia</th><th>Veic</th><th>Max</th><th>Prog</th><th>Realiz</th><th>Dif</th><th>KmProd</th><th>KmImprod</th><th>KmTotal</th>
+          </tr>
+          <tr>
+            <td>01/08/2026</td><td>Sab</td><td>42</td><td>38</td><td>924</td><td>920</td><td>4</td><td>6.500,00</td><td>389,40</td><td>6.889,40</td>
+          </tr>
+        </table>
+      </body></html>
+    ''';
+
+    final ds = await LocalDataLoader.carregarArquivosSelecionados([
+      _FakePickedFile(
+        name: 'Mensal_082026.html',
+        path: 'C:/relatorios/Mensal_082026.html',
+        html: htmlMensal,
+      ),
+    ]);
+
+    expect(ds.isEmpty, isFalse);
+    expect(ds.arquivosHtmlCarregados.length, 1);
+    expect(ds.arquivosHtmlCarregados.first.nome, 'Mensal_082026.html');
+    final resumosMensal = ds.resumos.where((r) => r.periodicidade == 'Mensal').toList();
+    final resumosQuinzenalDerivados = ds.resumos.where((r) => r.periodicidade == 'Quinzenal').toList();
+    expect(resumosMensal.length, 1);
+    expect(resumosMensal.first.calculadoViaDiario, isFalse);
+    expect(resumosQuinzenalDerivados.length, 1);
+    expect(resumosQuinzenalDerivados.first.calculadoViaDiario, isTrue);
+    expect(resumosMensal.first.viagensProg, 924);
+    expect(resumosMensal.first.viagensRealiz, 920);
+    expect(resumosMensal.first.kmTotal, closeTo(6889.40, 0.01));
+    expect(ds.mesesDisponiveis, contains('Agosto/2026'));
+  });
+
+  test('Calcula Mensal via diarios, ignora sobreposicao igual, alerta discrepancia e preserva uploads um por um', () async {
+    const htmlQuinzenal = '''
+      <html><body>
+        <table class="data">
+          <tr>
+            <th>Data</th><th>Dia</th><th>Veic</th><th>Max</th><th>Prog</th><th>Realiz</th><th>Dif</th><th>KmProd</th><th>KmImprod</th><th>KmTotal</th>
+          </tr>
+          <tr>
+            <td>01/08/2026</td><td>Sab</td><td>42</td><td>38</td><td>924</td><td>920</td><td>4</td><td>6.500,00</td><td>389,40</td><td>6.889,40</td>
+          </tr>
+          <tr>
+            <td>02/08/2026</td><td>Dom</td><td>30</td><td>28</td><td>800</td><td>790</td><td>10</td><td>5.000,00</td><td>300,75</td><td>5.300,75</td>
+          </tr>
+        </table>
+      </body></html>
+    ''';
+
+    // 1. Anexa primeiro apenas o Quinzenal -> deve calcular automaticamente o Mensal via diários
+    var ds = await LocalDataLoader.carregarArquivosSelecionados([
+      _FakePickedFile(
+        name: 'Quinzenal_082026.html',
+        path: 'C:/relatorios/Quinzenal/Quinzenal_082026.html',
+        html: htmlQuinzenal,
+      ),
+    ]);
+
+    expect(ds.resumos.where((r) => r.periodicidade == 'Quinzenal').length, 2);
+    final mensaisCalculados = ds.resumos.where((r) => r.periodicidade == 'Mensal').toList();
+    expect(mensaisCalculados.length, 2);
+    expect(mensaisCalculados.every((r) => r.calculadoViaDiario), isTrue);
+    expect(ds.discrepanciasDetectadas, isEmpty);
+
+    // 2. Anexa um por um o HTML de Passageiros -> preserva os Resumos já carregados
+    const htmlPassageiros = '''
+      <html><body>
+        <table class="data">
+          <tr><th>Mes</th><th>Dia</th><th>Catraca</th><th>Antecipados</th><th>NaoPagantes</th><th>Total</th></tr>
+          <tr><td>2026-08</td><td>01</td><td>5.168</td><td>676</td><td>10.700</td><td>16.544</td></tr>
+        </table>
+      </body></html>
+    ''';
+    ds = await LocalDataLoader.carregarArquivosSelecionados(
+      [
+        _FakePickedFile(
+          name: 'Passageiros_Mensal.html',
+          path: 'C:/relatorios/Mensal/Passageiros_Mensal.html',
+          html: htmlPassageiros,
+        ),
+      ],
+      datasetExistente: ds,
+    );
+    expect(ds.resumos.where((r) => r.periodicidade == 'Mensal').length, 2);
+    expect(ds.passageiros.where((p) => p.periodicidade == 'Mensal').length, 1);
+    expect(ds.passageiros.where((p) => p.periodicidade == 'Quinzenal' && p.calculadoViaDiario).length, 1);
+
+    // 3. Anexa agora o HTML Mensal sobrepondo o cálculo feito via diários:
+    // - Dia 01/08/2026 tem valores IDÊNTICOS (deve ser ignorado sem duplicar e sem alerta)
+    // - Dia 02/08/2026 tem DISCREPÂNCIA em Realiz (750 vs 790) e KmTotal (5.100,00 vs 5.300,75) -> gera alerta!
+    // - Dia 03/08/2026 é um dia novo -> continua a validação e adiciona normalmente!
+    const htmlMensalSobreposto = '''
+      <html><body>
+        <table class="data">
+          <tr>
+            <th>Data</th><th>Dia</th><th>Veic</th><th>Max</th><th>Prog</th><th>Realiz</th><th>Dif</th><th>KmProd</th><th>KmImprod</th><th>KmTotal</th>
+          </tr>
+          <tr>
+            <td>01/08/2026</td><td>Sab</td><td>42</td><td>38</td><td>924</td><td>920</td><td>4</td><td>6.500,00</td><td>389,40</td><td>6.889,40</td>
+          </tr>
+          <tr>
+            <td>02/08/2026</td><td>Dom</td><td>30</td><td>28</td><td>800</td><td>750</td><td>50</td><td>4.800,00</td><td>300,00</td><td>5.100,00</td>
+          </tr>
+          <tr>
+            <td>03/08/2026</td><td>Seg</td><td>45</td><td>40</td><td>1.000</td><td>995</td><td>5</td><td>7.000,00</td><td>400,00</td><td>7.400,00</td>
+          </tr>
+        </table>
+      </body></html>
+    ''';
+
+    ds = await LocalDataLoader.carregarArquivosSelecionados(
+      [
+        _FakePickedFile(
+          name: 'Mensal_082026.html',
+          path: 'C:/relatorios/Mensal/Mensal_082026.html',
+          html: htmlMensalSobreposto,
+        ),
+      ],
+      datasetExistente: ds,
+    );
+
+    // Não duplicou dias: agora há 3 dias em Mensal e 3 dias em Quinzenal
+    expect(ds.resumos.where((r) => r.periodicidade == 'Mensal').length, 3);
+    expect(ds.resumos.where((r) => r.periodicidade == 'Quinzenal').length, 3);
+    // O dia 01/08 idêntico foi contabilizado como ignorado
+    expect(ds.registrosIdenticosIgnorados, greaterThanOrEqualTo(1));
+    // Apenas o dia 02/08 gerou alerta de discrepância
+    expect(ds.discrepanciasDetectadas.length, 1);
+    expect(ds.discrepanciasDetectadas.first.data, '02/08/2026');
+    expect(ds.discrepanciasDetectadas.first.descricao, contains('Viagens Realiz.: diário=790 vs Mensal=750'));
+    expect(ds.discrepanciasDetectadas.first.descricao, contains('KM Total: diário=5300.75 vs Mensal=5100.00'));
+  });
+
+  test('ExportService.gerarBytesRelatorioPdf gera documento PDF executivo valido com sintese, KPIs, glossario e tabela', () async {
+    final resumos = [
+      ResumoDiario(
+        mesAno: 'Agosto/2026',
+        periodicidade: 'Mensal',
+        data: '01/08/2026',
+        dateTime: DateTime(2026, 8, 1),
+        weekday: 6,
+        veiculos: 42,
+        maxVeicFaixa: 38,
+        viagensProg: 924,
+        viagensRealiz: 920,
+        difViagens: 4,
+        kmProd: 6500.0,
+        kmImprod: 389.4,
+        kmTotal: 6889.4,
+      ),
+      ResumoDiario(
+        mesAno: 'Agosto/2026',
+        periodicidade: 'Mensal',
+        data: '03/08/2026',
+        dateTime: DateTime(2026, 8, 3),
+        weekday: 1,
+        veiculos: 45,
+        maxVeicFaixa: 40,
+        viagensProg: 1000,
+        viagensRealiz: 940,
+        difViagens: 60,
+        kmProd: 7000.0,
+        kmImprod: 500.0,
+        kmTotal: 7500.0,
+      ),
+    ];
+
+    final passageiros = [
+      PassageiroDiario(
+        mesAno: 'Agosto/2026',
+        periodicidade: 'Mensal',
+        data: '01/08/2026',
+        dateTime: DateTime(2026, 8, 1),
+        weekday: 6,
+        catraca: 5168,
+        antecipados: 676,
+        naoPagantes: 10700,
+        totalPassageiros: 16544,
+      ),
+      PassageiroDiario(
+        mesAno: 'Agosto/2026',
+        periodicidade: 'Mensal',
+        data: '03/08/2026',
+        dateTime: DateTime(2026, 8, 3),
+        weekday: 1,
+        catraca: 8200,
+        antecipados: 900,
+        naoPagantes: 14500,
+        totalPassageiros: 23600,
+      ),
+    ];
+
+    final fcvs = [
+      FcvDiario(
+        mesAno: 'Agosto/2026',
+        periodicidade: 'Mensal',
+        data: '01/08/2026',
+        dateTime: DateTime(2026, 8, 1),
+        weekday: 6,
+        manhaProg: 300,
+        manhaRealiz: 299,
+        tardeProg: 350,
+        tardeRealiz: 348,
+        noiteProg: 274,
+        noiteRealiz: 273,
+        totalProg: 924,
+        totalRealiz: 920,
+      ),
+    ];
+
+    final linhas = [
+      LinhaDiaria(
+        mesAno: 'Agosto/2026',
+        periodicidade: 'Mensal',
+        data: '01/08/2026',
+        dateTime: DateTime(2026, 8, 1),
+        weekday: 6,
+        linha: '01 - Circular SCS',
+        viagensProg: 220,
+        viagensRealiz: 218,
+        kmTotal: 1540.0,
+      ),
+    ];
+
+    final alertas = [
+      const AlertaExecutivoPdf(
+        titulo: 'Descumprimento de FCV em 03/08/2026 (Seg)',
+        descricao: 'FCV atingiu 94.0% (60 viagens não realizadas). Impacto direto no intervalo de espera em SCS.',
+        critico: true,
+      ),
+    ];
+
+    final pdfBytes = await ExportService.gerarBytesRelatorioPdf(
+      mesSelecionado: 'Agosto/2026',
+      periodicidade: 'Mensal',
+      linhaSelecionada: null,
+      intervaloTexto: '01/08/2026 a 03/08/2026 (Mês Todo)',
+      origemDados: 'MongoDB',
+      resumos: resumos,
+      passageiros: passageiros,
+      fcv: fcvs,
+      faixasHorarias: const [],
+      linhas: linhas,
+      alertas: alertas,
+    );
+
+    expect(pdfBytes.length, greaterThan(1000));
+    // Assinatura mágica de arquivo PDF: "%PDF-"
+    final headerAscii = ascii.decode(pdfBytes.sublist(0, 5));
+    expect(headerAscii, '%PDF-');
+  });
+
+  test('LocalDataLoader.carregarPasta escaneia recursivamente pasta com multiplos HTMLs e subpastas', () async {
+    final tempDir = Directory.systemTemp.createTempSync('semob_test_pasta_');
+    try {
+      final subMensal = Directory('${tempDir.path}/Mensal')..createSync();
+      final subQuinzenal = Directory('${tempDir.path}/Quinzenal')..createSync();
+
+      const htmlResumo = '''
+        <html><body><table>
+          <tr><th>Data</th><th>Dia</th><th>Veic</th><th>Max</th><th>Prog</th><th>Realiz</th><th>Dif</th><th>KmProd</th><th>KmImprod</th><th>KmTotal</th></tr>
+          <tr><td>01/08/2026</td><td>Sab</td><td>40</td><td>38</td><td>900</td><td>895</td><td>5</td><td>6.000,00</td><td>300,00</td><td>6.300,00</td></tr>
+        </table></body></html>
+      ''';
+      File('${subMensal.path}/Mensal_082026.html').writeAsStringSync(htmlResumo);
+
+      const htmlSaldos = '''
+        <html><body><table>
+          <tr><th>Data</th><th>Serie</th><th>Transferidos</th><th>SaldoFinal</th></tr>
+          <tr><td>01/08/2026</td><td>1</td><td>10.000,00</td><td>50.000,00</td></tr>
+        </table></body></html>
+      ''';
+      // Arquivo exclusivo de processamento do backend: deve ser registrado em arquivosHtmlCarregados
+      File('${subMensal.path}/Saldos_Mensal.html').writeAsStringSync(htmlSaldos);
+
+      const htmlFxHr = '''
+        <html><body><table>
+          <tr><th>Linha</th><th>Data</th><th>Hora</th><th>Faixa</th><th>Veiculos</th><th>Viagens</th><th>Partidas</th></tr>
+          <tr><td>01</td><td>01/08/2026</td><td>06</td><td>06:00-06:59</td><td>5</td><td>10</td><td>06:10, 06:30</td></tr>
+        </table></body></html>
+      ''';
+      File('${subQuinzenal.path}/Resumo_FxHr_Mensal_082026.html').writeAsStringSync(htmlFxHr);
+
+      final ds = await LocalDataLoader.carregarPasta(tempDir.path);
+
+      expect(ds.isEmpty, isFalse);
+      // Todos os 3 arquivos foram identificados e registrados para envio ao banco
+      expect(ds.arquivosHtmlCarregados.length, 3);
+      final nomes = ds.arquivosHtmlCarregados.map((a) => a.nome).toList();
+      expect(nomes, contains('Mensal_082026.html'));
+      expect(nomes, contains('Saldos_Mensal.html'));
+      expect(nomes, contains('Resumo_FxHr_Mensal_082026.html'));
+
+      // Resumos e faixas horárias foram devidamente processados localmente
+      expect(ds.resumos.isNotEmpty, isTrue);
+      expect(ds.resumos.first.data, '01/08/2026');
+      expect(ds.faixasHorarias.isNotEmpty, isTrue);
+      expect(ds.faixasHorarias.first.linha, '01');
+    } finally {
+      try {
+        tempDir.deleteSync(recursive: true);
+      } catch (_) {}
+    }
+  });
+
+  test('Reconciliacao entre Base Mensal do MongoDB e HTML Mensal nao gera falso alerta de frota por faixa horaria nem de catraca consolidada', () async {
+    // Simula Base Mensal carregada do MongoDB (incluindo cenário legado onde frota era pico de linha/faixa = 5 e catraca = pagantes totais)
+    final dsBanco = SemobDataset()
+      ..resumos.add(
+        ResumoDiario(
+          mesAno: 'Agosto/2026',
+          periodicidade: 'Mensal',
+          data: '01/08/2026',
+          dateTime: DateTime(2026, 8, 1),
+          weekday: 6,
+          veiculos: 5,
+          maxVeicFaixa: 5,
+          viagensProg: 924,
+          viagensRealiz: 924,
+          difViagens: 0,
+          kmProd: 6889.4,
+          kmImprod: 344.3,
+          kmTotal: 7233.7,
+        ),
+      )
+      ..passageiros.add(
+        PassageiroDiario(
+          mesAno: 'Agosto/2026',
+          periodicidade: 'Mensal',
+          data: '01/08/2026',
+          dateTime: DateTime(2026, 8, 1),
+          weekday: 6,
+          catraca: 5844, // catraca (5168) + antecipados (676)
+          antecipados: 0,
+          naoPagantes: 10700,
+          totalPassageiros: 16544,
+        ),
+      );
+    LocalDataLoader.reconciliarDerivacoesDiarias(dsBanco);
+
+    const htmlMensal = '''
+      <html><body>
+        <table class="data">
+          <tr>
+            <th>Data</th><th>Dia</th><th>Veic</th><th>Max</th><th>Prog</th><th>Realiz</th><th>Dif</th><th>KmProd</th><th>KmImprod</th><th>KmTotal</th>
+          </tr>
+          <tr>
+            <td>01/08/2026</td><td>Sab</td><td>37</td><td>35</td><td>924</td><td>924</td><td>0</td><td>6.889,4</td><td>344,3</td><td>7.233,7</td>
+          </tr>
+        </table>
+      </body></html>
+    ''';
+
+    const htmlPassageiros = '''
+      <html><body>
+        <table class="data">
+          <tr><th>Mes</th><th>Dia</th><th>Catraca</th><th>Antecipados</th><th>NaoPagantes</th><th>Total</th></tr>
+          <tr><td>2026-08</td><td>01</td><td>5.168</td><td>676</td><td>10.700</td><td>16.544</td></tr>
+        </table>
+      </body></html>
+    ''';
+
+    final dsReconciliado = await LocalDataLoader.carregarArquivosSelecionados(
+      [
+        _FakePickedFile(
+          name: 'Mensal_202608.html',
+          path: 'C:/relatorios/Mensal_202608.html',
+          html: htmlMensal,
+        ),
+        _FakePickedFile(
+          name: 'Passageiros_Mensal.html',
+          path: 'C:/relatorios/Passageiros_Mensal.html',
+          html: htmlPassageiros,
+        ),
+      ],
+      datasetExistente: dsBanco,
+    );
+
+    // Nenhum falso alerta de discrepância deve ser gerado
+    expect(dsReconciliado.discrepanciasDetectadas, isEmpty);
+    // Frota e decomposição de passageiros foram enriquecidas com os valores completos do sistema
+    final resumoMensal = dsReconciliado.resumos.firstWhere((r) => r.periodicidade == 'Mensal');
+    expect(resumoMensal.veiculos, 37);
+    expect(resumoMensal.maxVeicFaixa, 35);
+    final passMensal = dsReconciliado.passageiros.firstWhere((p) => p.periodicidade == 'Mensal');
+    expect(passMensal.catraca, 5168);
+    expect(passMensal.antecipados, 676);
+  });
+
+  test('carregarArquivosSelecionados processa lote de PlatformFile (com propriedade .bytes sem .readAsBytes)', () async {
+    const htmlMensal = '''
+      <html><body><table class="data">
+        <tr><th>Data</th><th>Dia</th><th>Veic</th><th>Max</th><th>Prog</th><th>Realiz</th><th>Dif</th><th>KmProd</th><th>KmImprod</th><th>KmTotal</th></tr>
+        <tr><td>01/08/2026</td><td>Sab</td><td>37</td><td>35</td><td>924</td><td>924</td><td>0</td><td>6.889,4</td><td>344,3</td><td>7.233,7</td></tr>
+      </table></body></html>
+    ''';
+    const htmlPassageiros = '''
+      <html><body><table class="data">
+        <tr><th>Mes</th><th>Dia</th><th>Catraca</th><th>Antecipados</th><th>NaoPagantes</th><th>Total</th></tr>
+        <tr><td>2026-08</td><td>01</td><td>5.168</td><td>676</td><td>10.700</td><td>16.544</td></tr>
+      </table></body></html>
+    ''';
+
+    final ds = await LocalDataLoader.carregarArquivosSelecionados([
+      _FakePlatformFile(
+        name: 'Mensal_202608.html',
+        path: 'C:/relatorios/Mensal_202608.html',
+        bytes: utf8.encode(htmlMensal),
+      ),
+      _FakePlatformFile(
+        name: 'Passageiros_Mensal.html',
+        path: 'C:/relatorios/Passageiros_Mensal.html',
+        bytes: utf8.encode(htmlPassageiros),
+      ),
+    ]);
+
+    expect(ds.arquivosHtmlCarregados.length, 2);
+    expect(ds.resumos.isNotEmpty, isTrue);
+    expect(ds.passageiros.isNotEmpty, isTrue);
+  });
+}
+
+class _FakePlatformFile {
+  final String name;
+  final String? path;
+  final List<int>? bytes;
+
+  _FakePlatformFile({
+    required this.name,
+    this.path,
+    this.bytes,
   });
 }
