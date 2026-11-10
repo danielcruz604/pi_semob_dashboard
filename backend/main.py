@@ -22,6 +22,7 @@ from app.schemas.dashboard_schema import (
 from app.schemas.transporte_schema import RespostaProcessamentoEPersistenciaSchema
 from app.services.transporte_repository import garantir_indices
 from app.utils.connection_factory import ConnectionFactory
+from app.utils.token_config import ROTA_PROTEGIDA
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ app.add_api_route(
     methods=["POST"],
     response_model=RespostaProcessamentoEPersistenciaSchema,
     tags=["Transporte"],
+    dependencies=ROTA_PROTEGIDA,
 )
 app.add_api_route(
     "/api/v1/dashboard/metricas",
@@ -62,6 +64,7 @@ app.add_api_route(
     methods=["GET"],
     response_model=ResumoOperacionalSchema,
     tags=["Dashboard"],
+    dependencies=ROTA_PROTEGIDA,
 )
 app.add_api_route(
     "/api/v1/dashboard/relatorio",
@@ -70,6 +73,7 @@ app.add_api_route(
     name="relatorio_consolidado_v1_get",
     response_model=RelatorioConsolidadoSchema,
     tags=["Dashboard"],
+    dependencies=ROTA_PROTEGIDA,
 )
 app.add_api_route(
     "/api/v1/dashboard/relatorio",
@@ -78,6 +82,7 @@ app.add_api_route(
     name="relatorio_consolidado_v1_post",
     response_model=RelatorioConsolidadoSchema,
     tags=["Dashboard"],
+    dependencies=ROTA_PROTEGIDA,
 )
 app.add_api_route(
     "/api/v1/dashboard/relatorio/upload-e-gerar",
@@ -86,6 +91,7 @@ app.add_api_route(
     name="upload_lote_e_gerar_relatorio_v1",
     response_model=RelatorioUploadIntegradoSchema,
     tags=["Dashboard"],
+    dependencies=ROTA_PROTEGIDA,
 )
 
 @app.get("/")

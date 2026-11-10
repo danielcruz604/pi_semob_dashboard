@@ -42,12 +42,15 @@ def _compatibilizar_mongomock() -> None:
 _compatibilizar_mongomock()
 
 #API e banco
+from auth_helpers import cabecalho_autenticado  # noqa: E402
+
 @pytest.fixture
 def client():
     #TestClient do app real (main.py). Exceções não tratadas viram respostas HTTP 500.
     from main import app
 
-    return TestClient(app, raise_server_exceptions=False)
+    # As rotas de dados exigem JWT; o cliente padrão dos testes já envia um token de gestor válido.
+    return TestClient(app, raise_server_exceptions=False, headers=cabecalho_autenticado())
 
 @pytest.fixture
 def db():

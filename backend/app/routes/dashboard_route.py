@@ -24,9 +24,10 @@ from app.services.dashboard_service import (
     processar_arquivos_e_gerar_relatorio,
 )
 from app.utils.connection_factory import ConnectionFactory
+from app.utils.token_config import ROTA_PROTEGIDA
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
+router = APIRouter(prefix="/dashboard", dependencies=ROTA_PROTEGIDA, tags=["Dashboard"])
 
 def _executar_consulta(funcao, *args, **kwargs):
     try:

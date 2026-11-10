@@ -405,6 +405,33 @@ class LocalDataLoader {
     return partes.isNotEmpty ? partes.last : 'Pasta';
   }
 
+  /// Abre o seletor nativo de pastas na Web (`webkitdirectory`) e retorna os arquivos `.html`/`.htm` encontrados.
+  static Future<List<ArquivoLido>> selecionarArquivosDaPastaWeb() {
+    return selecionarPastaWeb(arquivoEhHtmlSuportado);
+  }
+
+  /// Processa uma lista de `ArquivoLido` já escaneados (de uma pasta nativa ou Web) e mescla no `SemobDataset`.
+  static SemobDataset carregarListaArquivosLidos(
+    List<ArquivoLido> arquivosLidos, {
+    SemobDataset? datasetExistente,
+  }) {
+    final dataset = datasetExistente ?? SemobDataset();
+    for (final arq in arquivosLidos) {
+      if (!arquivoEhHtmlSuportado(arq.nome) || arq.bytes.isEmpty) continue;
+      _registrarArquivoHtmlUnico(dataset, arq);
+      if (arquivoEhRelatorioUtil(arq.nome)) {
+        _processarArquivoIndividual(
+          nomeArquivo: arq.nome,
+          caminhoCompleto: arq.caminho,
+          bytes: arq.bytes,
+          dataset: dataset,
+        );
+      }
+    }
+    reconciliarDerivacoesDiarias(dataset);
+    return dataset;
+  }
+
   /// Carrega uma pasta nativa e mescla (ou cria) o `SemobDataset`,
   /// calculando automaticamente visões Quinzenais/Mensais ausentes a partir dos diários
   /// e validando sobreposições sem duplicar nem perder dados.
@@ -420,20 +447,10 @@ class LocalDataLoader {
       arquivoEhHtmlSuportado,
     );
 
-    for (final arq in arquivosLidos) {
-      _registrarArquivoHtmlUnico(dataset, arq);
-      if (arquivoEhRelatorioUtil(arq.nome)) {
-        _processarArquivoIndividual(
-          nomeArquivo: arq.nome,
-          caminhoCompleto: arq.caminho,
-          bytes: arq.bytes,
-          dataset: dataset,
-        );
-      }
-    }
-
-    reconciliarDerivacoesDiarias(dataset);
-    return dataset;
+    return carregarListaArquivosLidos(
+      arquivosLidos,
+      datasetExistente: dataset,
+    );
   }
 
   /// Carrega um ou mais arquivos HTML selecionados pelo usuário (juntos, um por um ou em ordem aleatória),
@@ -446,31 +463,16 @@ class LocalDataLoader {
     final dataset = datasetExistente ?? SemobDataset();
     for (final arquivo in files) {
       try {
-        final String nome = arquivo.name?.toString() ?? 'relatorio.html';
-        if (!arquivoEhHtmlSuportado(nome)) continue;
+        final arqLido = await _extrairArquivoLido(arquivo);
+        if (arqLido == null) continue;
 
-        final List<int> bytes = await arquivo.readAsBytes();
-        String caminho = nome;
-        if (!kIsWeb) {
-          try {
-            caminho = arquivo.path?.toString() ?? nome;
-          } catch (_) {}
-        }
+        _registrarArquivoHtmlUnico(dataset, arqLido);
 
-        _registrarArquivoHtmlUnico(
-          dataset,
-          ArquivoLido(
-            nome: nome,
-            caminho: caminho,
-            bytes: bytes,
-          ),
-        );
-
-        if (arquivoEhRelatorioUtil(nome)) {
+        if (arquivoEhRelatorioUtil(arqLido.nome)) {
           _processarArquivoIndividual(
-            nomeArquivo: nome,
-            caminhoCompleto: caminho,
-            bytes: bytes,
+            nomeArquivo: arqLido.nome,
+            caminhoCompleto: arqLido.caminho,
+            bytes: arqLido.bytes,
             dataset: dataset,
           );
         }
@@ -481,9 +483,86 @@ class LocalDataLoader {
     return dataset;
   }
 
+  /// Extrai nome, caminho e bytes de qualquer objeto de arquivo (`PlatformFile`, `XFile`, `ArquivoLido` ou mock).
+  static Future<ArquivoLido?> _extrairArquivoLido(dynamic arquivo) async {
+    if (arquivo is ArquivoLido) {
+      if (!arquivoEhHtmlSuportado(arquivo.nome) || arquivo.bytes.isEmpty) return null;
+      return arquivo;
+    }
+
+    String nome = 'relatorio.html';
+    try {
+      final n = arquivo.name?.toString();
+      if (n != null && n.isNotEmpty) nome = n;
+    } catch (_) {}
+
+    if (!arquivoEhHtmlSuportado(nome)) return null;
+
+    String caminho = nome;
+    if (!kIsWeb) {
+      try {
+        final p = arquivo.path?.toString();
+        if (p != null && p.isNotEmpty) caminho = p;
+      } catch (_) {}
+    }
+
+    List<int>? bytes;
+
+    // 1. Tenta ler propriedade `.bytes` (PlatformFile do file_picker com withData: true)
+    try {
+      final rawBytes = arquivo.bytes;
+      if (rawBytes is List<int> && rawBytes.isNotEmpty) {
+        bytes = rawBytes;
+      }
+    } catch (_) {}
+
+    // 2. Tenta ler via `.xFile.readAsBytes()` (PlatformFile no file_picker 8+/13+)
+    if (bytes == null || bytes.isEmpty) {
+      try {
+        final xf = arquivo.xFile;
+        if (xf != null) {
+          final lidos = await xf.readAsBytes();
+          if (lidos is List<int> && lidos.isNotEmpty) {
+            bytes = lidos;
+          }
+        }
+      } catch (_) {}
+    }
+
+    // 3. Tenta ler via `.readAsBytes()` direto (XFile ou mock de teste)
+    if (bytes == null || bytes.isEmpty) {
+      try {
+        final lidos = await arquivo.readAsBytes();
+        if (lidos is List<int> && lidos.isNotEmpty) {
+          bytes = lidos;
+        }
+      } catch (_) {}
+    }
+
+    // 4. Fallback nativo via caminho no disco (Windows/Linux/macOS/Android)
+    if ((bytes == null || bytes.isEmpty) && !kIsWeb && caminho != nome) {
+      try {
+        final lidosDisco = await lerArquivoNativoPorCaminho(caminho);
+        if (lidosDisco.isNotEmpty) {
+          bytes = lidosDisco;
+        }
+      } catch (_) {}
+    }
+
+    if (bytes == null || bytes.isEmpty) return null;
+
+    return ArquivoLido(
+      nome: nome,
+      caminho: caminho,
+      bytes: bytes,
+    );
+  }
+
   static void _registrarArquivoHtmlUnico(SemobDataset ds, ArquivoLido novo) {
     final idx = ds.arquivosHtmlCarregados.indexWhere(
-      (a) => a.nome.toLowerCase() == novo.nome.toLowerCase(),
+      (a) =>
+          a.caminho.toLowerCase() == novo.caminho.toLowerCase() ||
+          a.nome.toLowerCase() == novo.nome.toLowerCase(),
     );
     if (idx >= 0) {
       ds.arquivosHtmlCarregados[idx] = novo;

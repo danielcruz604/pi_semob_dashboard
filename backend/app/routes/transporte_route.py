@@ -10,9 +10,10 @@ from app.services.transporte_service import (
     processar_e_persistir_html_bytes,
     processar_html_bytes,
 )
+from app.utils.token_config import ROTA_PROTEGIDA
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/transporte", tags=["Transporte"])
+router = APIRouter(prefix="/transporte", dependencies=ROTA_PROTEGIDA, tags=["Transporte"])
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 CHUNK_SIZE = 1024 * 1024

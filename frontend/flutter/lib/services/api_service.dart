@@ -32,6 +32,12 @@ class ApiService {
           'Authorization': 'Bearer $_tokenEfetivo',
       };
 
+  /// Avisa o app quando a API recusa o token (sessão expirada) e devolve a resposta.
+  http.Response _verificarAutorizacao(http.Response res) {
+    RelatorioApiService.notificarRespostaNaoAutorizada(res.statusCode);
+    return res;
+  }
+
   /// Testa conexão com a API FastAPI (verifica a raiz `/` e `/api/dashboard/filtros`)
   Future<bool> verificarServidorOnline() async {
     try {
@@ -40,9 +46,9 @@ class ApiService {
           .timeout(const Duration(seconds: 3));
       if (resRoot.statusCode == 200) return true;
 
-      final resFiltros = await http
+      final resFiltros = _verificarAutorizacao(await http
           .get(Uri.parse('$baseUrl/dashboard/filtros'), headers: _headers)
-          .timeout(const Duration(seconds: 3));
+          .timeout(const Duration(seconds: 3)));
       return resFiltros.statusCode == 200;
     } catch (_) {
       return false;
@@ -88,7 +94,7 @@ class ApiService {
       req.files.add(http.MultipartFile.fromBytes('file', bytes, filename: nomeArquivo));
 
       final streamed = await req.send().timeout(const Duration(seconds: 40));
-      final res = await http.Response.fromStream(streamed);
+      final res = _verificarAutorizacao(await http.Response.fromStream(streamed));
       if (res.statusCode == 200) {
         if (datasetParaAlertas != null) {
           try {
@@ -137,7 +143,7 @@ class ApiService {
           }
           reqProc.files.add(http.MultipartFile.fromBytes('file', bytes, filename: nomeArquivo));
           final streamedProc = await reqProc.send().timeout(const Duration(seconds: 40));
-          final resProc = await http.Response.fromStream(streamedProc);
+          final resProc = _verificarAutorizacao(await http.Response.fromStream(streamedProc));
           return resProc.statusCode == 200;
         }
       }
@@ -153,32 +159,36 @@ class ApiService {
   Future<SemobDataset?> carregarDatasetDoBanco() async {
     try {
       // 1. Verifica filtros disponíveis
-      final resFiltros = await http.get(Uri.parse('$baseUrl/dashboard/filtros'), headers: _headers);
+      final resFiltros = _verificarAutorizacao(
+        await http.get(Uri.parse('$baseUrl/dashboard/filtros'), headers: _headers),
+      );
       if (resFiltros.statusCode != 200) return null;
       final Map<String, dynamic> filtros = jsonDecode(utf8.decode(resFiltros.bodyBytes));
       if (filtros['data_minima'] == null) return null;
 
       // 2. Busca série diária consolidada
-      final resSerie = await http.get(
+      final resSerie = _verificarAutorizacao(await http.get(
         Uri.parse('$baseUrl/dashboard/serie-temporal?agrupamento=diario'),
         headers: _headers,
-      );
+      ));
       if (resSerie.statusCode != 200) return null;
       final Map<String, dynamic> bodySerie = jsonDecode(utf8.decode(resSerie.bodyBytes));
       final List serie = bodySerie['serie'] as List? ?? [];
 
       // 3. Busca faixas horárias
-      final resHorarios = await http.get(Uri.parse('$baseUrl/dashboard/horarios'), headers: _headers);
+      final resHorarios = _verificarAutorizacao(
+        await http.get(Uri.parse('$baseUrl/dashboard/horarios'), headers: _headers),
+      );
       final List horariosRaw =
           resHorarios.statusCode == 200 ? (jsonDecode(utf8.decode(resHorarios.bodyBytes)) as List? ?? []) : [];
 
       // 4. Busca resumo operacional para recuperar FCV por turno (manhã, tarde, noite) se disponível
       Map<String, dynamic>? resumoRaw;
       try {
-        final resResumo = await http.get(
+        final resResumo = _verificarAutorizacao(await http.get(
           Uri.parse('$baseUrl/dashboard/resumo-operacional'),
           headers: _headers,
-        );
+        ));
         if (resResumo.statusCode == 200) {
           resumoRaw = jsonDecode(utf8.decode(resResumo.bodyBytes)) as Map<String, dynamic>?;
         }
@@ -364,7 +374,7 @@ class ApiService {
     };
     final uri = Uri.parse('$baseUrl/dashboard/resumo-operacional')
         .replace(queryParameters: queryParams.isEmpty ? null : queryParams);
-    final res = await http.get(uri, headers: _headers);
+    final res = _verificarAutorizacao(await http.get(uri, headers: _headers));
     if (res.statusCode == 200) {
       return ResumoOperacional.fromJson(jsonDecode(utf8.decode(res.bodyBytes)));
     }
@@ -379,7 +389,7 @@ class ApiService {
     };
     final uri = Uri.parse('$baseUrl/dashboard/anomalias')
         .replace(queryParameters: queryParams.isEmpty ? null : queryParams);
-    final res = await http.get(uri, headers: _headers);
+    final res = _verificarAutorizacao(await http.get(uri, headers: _headers));
     if (res.statusCode == 200) {
       return AnomaliasResponse.fromJson(jsonDecode(utf8.decode(res.bodyBytes)));
     }
@@ -393,7 +403,7 @@ class ApiService {
     };
     final uri = Uri.parse('$baseUrl/dashboard/linhas-ranking')
         .replace(queryParameters: queryParams.isEmpty ? null : queryParams);
-    final res = await http.get(uri, headers: _headers);
+    final res = _verificarAutorizacao(await http.get(uri, headers: _headers));
     if (res.statusCode == 200) {
       final List data = jsonDecode(utf8.decode(res.bodyBytes));
       return data.map((e) => LinhaRanking.fromJson(e)).toList();
