@@ -913,6 +913,52 @@ class RelatorioApiService {
     }
   }
 
+  /// Cadastra um novo usuário em `POST /api/usuarios/` (restrito ao perfil administrador/gestor).
+  static Future<Map<String, dynamic>> cadastrarUsuario({
+    required String nome,
+    required String email,
+    required String senha,
+    required String papel,
+    http.Client? client,
+  }) async {
+    const endpoint = '/api/usuarios/';
+    final uri = Uri.parse('$baseUrl$endpoint');
+    final httpClient = client ?? http.Client();
+    try {
+      final response = await httpClient
+          .post(
+            uri,
+            headers: montarHeaders(jsonBody: true),
+            body: jsonEncode({
+              'nome': nome.trim(),
+              'email': email.trim().toLowerCase(),
+              'senha': senha,
+              'papel': papel.trim().toLowerCase(),
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      final payload = _decodificarJsonObjeto(response, endpoint);
+      if (response.statusCode == 201 || response.statusCode == 200) {
+        return payload;
+      }
+      throw RelatorioApiException(
+        _extrairDetalheErro(payload, response.statusCode),
+        statusCode: response.statusCode,
+        endpoint: endpoint,
+      );
+    } on RelatorioApiException {
+      rethrow;
+    } catch (e) {
+      throw RelatorioApiException(
+        'Não foi possível cadastrar o usuário ($baseUrl): $e',
+        endpoint: endpoint,
+      );
+    } finally {
+      if (client == null) httpClient.close();
+    }
+  }
+
   ///Envia um único arquivo `.html`/`.htm` para o backend processar e salvar no MongoDB.
   static Future<ResultadoProcessamentoHtml> enviarArquivoHtmlIndividual({
     required String nomeArquivo,
